@@ -210,8 +210,9 @@ export default function DocumentUploadPage() {
         );
       }
 
-      // Navigate only after the workflow has completed.
-      router.push("/ai-persona-draft");
+      // Navigate only after the workflow has completed. Pass buildId so the draft page
+      // can fetch the orchestration artifacts (personaDraft, etc).
+      router.push(`/ai-persona-draft?buildId=${encodeURIComponent(buildId)}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Something went wrong.";
       alert(msg);
