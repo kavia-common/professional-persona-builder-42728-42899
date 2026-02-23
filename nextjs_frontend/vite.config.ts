@@ -25,6 +25,23 @@ export default defineConfig({
     host: true, // equivalent to 0.0.0.0
     port: 3000,
     strictPort: true,
+
+    /**
+     * Allow access when the dev server is reached through the VSCode internal preview/proxy URL.
+     * Without this, Vite blocks requests with: "Blocked request. Host is not allowed".
+     *
+     * Notes:
+     * - Vite compares the Host header (hostname only, no scheme/path).
+     * - The preview host typically looks like: vscode-internal-<id>-beta.beta01.cloud.kavia.ai
+     */
+    allowedHosts: [
+      // Exact host observed in the user report
+      'vscode-internal-38734-beta.beta01.cloud.kavia.ai',
+
+      // Future-proof common variants in this environment
+      '.cloud.kavia.ai',
+      '.beta01.cloud.kavia.ai',
+    ],
   },
 
   // File types to support raw imports. Never add .css, .tsx, or .ts files to this.
