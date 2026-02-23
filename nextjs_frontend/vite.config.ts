@@ -17,6 +17,16 @@ export default defineConfig({
     },
   },
 
+  /**
+   * Ensure the dev server binds to the expected host/port in containerized preview environments.
+   * Many orchestrators probe port 3000 and require binding to 0.0.0.0 (not just localhost).
+   */
+  server: {
+    host: true, // equivalent to 0.0.0.0
+    port: 3000,
+    strictPort: true,
+  },
+
   // File types to support raw imports. Never add .css, .tsx, or .ts files to this.
   assetsInclude: ['**/*.svg', '**/*.csv'],
 })
