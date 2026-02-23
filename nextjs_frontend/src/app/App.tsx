@@ -5,6 +5,7 @@ import { Upload, Loader2, X, Edit3, Plus, CheckCircle2, Camera, Award, Compass }
 // The original export referenced a `figma:asset/...` virtual module.
 // Use the equivalent local file that exists in `src/assets/`.
 import bgImage from '../assets/24fa192a7a1db10ae3078a00cc00f09e2f26b6de.png';
+import { apiClient, ApiError, PersonaDraft } from '../lib/apiClient';
 
 type AppState = 'initial' | 'processing' | 'draft' | 'finalized';
 
@@ -53,7 +54,8 @@ export default function App() {
   const [personaData, setPersonaData] = useState<PersonaData>({
     name: 'Sarah Johnson',
     title: 'Senior Product Manager',
-    summary: 'Results-driven Product Manager with 8+ years of experience leading cross-functional teams to deliver innovative SaaS solutions. Proven track record in strategic planning, user-centered design, and data-driven decision making. Passionate about transforming complex business challenges into elegant product experiences.',
+    summary:
+      'Results-driven Product Manager with 8+ years of experience leading cross-functional teams to deliver innovative SaaS solutions. Proven track record in strategic planning, user-centered design, and data-driven decision making. Passionate about transforming complex business challenges into elegant product experiences.',
     skills: ['Product Strategy', 'Agile/Scrum', 'User Research', 'Data Analytics', 'Roadmap Planning', 'Stakeholder Management'],
     experiences: [
       {
@@ -61,15 +63,17 @@ export default function App() {
         role: 'Senior Product Manager',
         company: 'TechCorp Solutions',
         date: '2020 - Present',
-        description: 'Leading product development for enterprise SaaS platform serving 500K+ users. Increased user engagement by 45% through data-driven feature prioritization.'
+        description:
+          'Leading product development for enterprise SaaS platform serving 500K+ users. Increased user engagement by 45% through data-driven feature prioritization.',
       },
       {
         id: '2',
         role: 'Product Manager',
         company: 'Innovation Labs',
         date: '2017 - 2020',
-        description: 'Managed end-to-end product lifecycle for B2B marketplace. Successfully launched 3 major features that contributed to 30% revenue growth.'
-      }
+        description:
+          'Managed end-to-end product lifecycle for B2B marketplace. Successfully launched 3 major features that contributed to 30% revenue growth.',
+      },
     ],
     education: ['MBA, Stanford University', 'BS Computer Science, UC Berkeley'],
     certifications: ['Certified Scrum Product Owner (CSPO)', 'Google Analytics Certified'],
@@ -80,9 +84,50 @@ export default function App() {
       'Drove 45% increase in user engagement across enterprise platform',
       'Led cross-functional team of 12 members to successful product launch',
       'Achieved 30% revenue growth through strategic feature prioritization',
-      'Delivered 3 major product releases under budget and ahead of schedule'
-    ]
+      'Delivered 3 major product releases under budget and ahead of schedule',
+    ],
   });
+
+  const [activeBuildId, setActiveBuildId] = useState<string | null>(null);
+
+  /**
+   * Maps the backend PersonaDraft schema to the UI's PersonaData shape without changing UI layout/components.
+   */
+  const mapDraftToPersonaData = (draft: PersonaDraft): PersonaData => {
+    const headlineParts = (draft.profile?.headline || '').split(' - ');
+    const nameFromHeadline = headlineParts.length > 1 ? headlineParts[0] : undefined;
+    const titleFromHeadline = headlineParts.length > 1 ? headlineParts.slice(1).join(' - ') : draft.title;
+
+    return {
+      name: nameFromHeadline || personaData.name,
+      title: titleFromHeadline || personaData.title,
+      summary: draft.summary || personaData.summary,
+      skills: Array.isArray(draft.skills) && draft.skills.length > 0 ? draft.skills : personaData.skills,
+      // Backend draft is highlight-based; keep experiences UI stable by populating description-only placeholders.
+      experiences:
+        Array.isArray(draft.experienceHighlights) && draft.experienceHighlights.length > 0
+          ? draft.experienceHighlights.map((h, idx) => ({
+              id: `api-exp-${idx}-${Math.random().toString(36).slice(2, 9)}`,
+              role: 'Experience Highlight',
+              company: 'From Uploaded Documents',
+              date: '—',
+              description: h,
+            }))
+          : personaData.experiences,
+      // Keep the rest of the UI sections intact; backend draft doesn't provide these fields yet.
+      education: personaData.education,
+      certifications: personaData.certifications,
+      tools: personaData.tools,
+      industries:
+        draft.profile?.industry && String(draft.profile.industry).trim()
+          ? [String(draft.profile.industry)]
+          : personaData.industries,
+      yearsOfExperience: personaData.yearsOfExperience,
+      careerHighlights:
+        Array.isArray(draft.strengths) && draft.strengths.length > 0 ? draft.strengths : personaData.careerHighlights,
+      profileImage: personaData.profileImage,
+    };
+  };
 
   const ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.txt'];
   const MAX_FILES = 5;
@@ -142,11 +187,46 @@ export default function App() {
     setUploadError('');
   };
 
-  const handleGenerateDraft = () => {
+  const handleGenerateDraft = async () => {
+    setUploadError('');
     setState('processing');
-    setTimeout(() => {
+
+    try {
+      // 1) Upload documents (backend persists metadata + best-effort extraction as side effects).
+      await apiClient.uploadDocuments({
+        files: uploadedFiles.map((f) => f.file),
+        // No auth/user system in this UI yet; keep userId unset for now.
+      });
+
+      // 2) Run orchestration end-to-end; backend can auto-select latest docs by category.
+      // We uploaded docs without categories (UI does not currently collect category),
+      // so we rely on backend's current behavior (or future auto-selection).
+      const runAll = await apiClient.orchestrationRunAll({
+        autoCreatePersona: true,
+        useLatestCategoryDocs: true,
+      });
+
+      setActiveBuildId(runAll.build.id);
+
+      // 3) Fetch draft persona artifact from orchestration record if present.
+      // The run-all response doesn't embed persona directly in the typed schema above,
+      // but orchestration record typically carries it. Use a safe extraction.
+      const maybePersona = (runAll.orchestration as any)?.personaDraft || (runAll.orchestration as any)?.draft;
+      if (maybePersona && typeof maybePersona === 'object') {
+        setPersonaData(mapDraftToPersonaData(maybePersona as PersonaDraft));
+      }
+
       setState('draft');
-    }, 2000);
+    } catch (err) {
+      const message =
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Failed to generate draft persona.';
+      setUploadError(message);
+      setState('initial');
+    }
   };
 
   const handleSaveChanges = () => {
@@ -158,9 +238,31 @@ export default function App() {
     }, 3000);
   };
 
-  const handleFinalize = () => {
-    setState('finalized');
-    setIsEditable(false);
+  const handleFinalize = async () => {
+    // Preserve UI behavior: immediately move to finalized after backend call succeeds.
+    try {
+      if (activeBuildId) {
+        // Send the current edited personaData as the final override.
+        // This keeps UI unchanged while persisting server-side if configured.
+        await apiClient.finalizeBuild({
+          buildId: activeBuildId,
+          finalOverride: personaData as any,
+          saveFinal: true,
+          createVersion: true,
+        });
+      }
+      setState('finalized');
+      setIsEditable(false);
+    } catch (err) {
+      const message =
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Failed to finalize persona.';
+      // Reuse existing error surface (under upload card).
+      setUploadError(message);
+    }
   };
 
   const removeSkill = (skillToRemove: string) => {
