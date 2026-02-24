@@ -1,0 +1,32 @@
+# Next.js build output
+.next/
+out/
+
+# Dependencies
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment files (do not commit secrets)
+.env
+.env.*.local
+
+# OS / editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local knowledge/artifact store used by some agents/tools
+.knowledge/
+
+# Coverage / test artifacts
+coverage/
+.nyc_output/
+
+# TypeScript build info
+*.tsbuildinfo
