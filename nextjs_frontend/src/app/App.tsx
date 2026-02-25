@@ -243,7 +243,16 @@ export default function App() {
     []
   );
 
-  const [personaData, setPersonaData] = useState<PersonaData>(initialPersonaFallback);
+  /**
+   * personaData must be stable and must NOT be derived/set during render.
+   * We initialize it as null and promote it to the empty fallback exactly once via effect.
+   */
+  const [personaData, setPersonaData] = useState<PersonaData | null>(null);
+
+  useEffect(() => {
+    if (personaData !== null) return;
+    setPersonaData(initialPersonaFallback);
+  }, [initialPersonaFallback, personaData]);
 
   const ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.txt'];
   const MAX_FILES = 5;
@@ -421,6 +430,11 @@ export default function App() {
         return;
       }
 
+      if (!personaData) {
+        setBackendError('Nothing to save yet (persona data not loaded).');
+        return;
+      }
+
       await updatePersona({
         personaId,
         title: personaData.title,
@@ -518,7 +532,7 @@ export default function App() {
       clearInterval(interval);
       console.log(`[poll][gen:${generationId}] stopped polling (cleanup)`, { buildId });
     };
-  }, [buildId, state]);
+  }, [buildId, initialPersonaFallback, state]);
 
   // When we enter draft state, attempt to fetch orchestration artifacts and populate UI persona (best-effort).
   useEffect(() => {
@@ -569,12 +583,18 @@ export default function App() {
         console.log(`[artifacts][gen:${generationId}] draft persona extracted (pre-coerce):`, maybeDraft);
 
         setPersonaData((prev) => {
-          const coerced = coercePersonaDataFromBackendJson(maybeDraft, prev);
+          const fallback = prev ?? initialPersonaFallback;
+          const coerced = coercePersonaDataFromBackendJson(maybeDraft, fallback);
 
-          // Extra guard: if coercion returns same object reference or appears unchanged, log it.
-          if (coerced === prev) {
-            console.warn(`[artifacts][gen:${generationId}] coercion returned same reference as prev (unexpected)`);
-          } else {
+          // Guard requested by user: avoid updating state if draft yields effectively same personaData.
+          // This prevents effect-driven update loops when artifacts are fetched repeatedly.
+          if (maybeDraft && JSON.stringify(coerced) === JSON.stringify(prev ?? initialPersonaFallback)) {
+            console.log(`[artifacts][gen:${generationId}] personaData unchanged; skipping setPersonaData update`);
+            return prev;
+          }
+
+          // Extra diagnostics
+          if (prev) {
             const prevSummary = prev?.summary;
             const nextSummary = coerced?.summary;
             if (prevSummary === nextSummary) {
@@ -611,6 +631,7 @@ export default function App() {
   }, [personaId]);
 
   const removeSkill = (skillToRemove: string) => {
+    if (!personaData) return;
     setPersonaData({
       ...personaData,
       skills: personaData.skills.filter((s) => s !== skillToRemove),
@@ -619,6 +640,7 @@ export default function App() {
   };
 
   const addSkill = (skill: string) => {
+    if (!personaData) return;
     if (skill.trim()) {
       setPersonaData({
         ...personaData,
@@ -646,7 +668,7 @@ export default function App() {
     profileImageObjectUrlRef.current = url;
 
     setPersonaData((prev) => ({
-      ...prev,
+      ...(prev ?? initialPersonaFallback),
       profileImage: url,
     }));
     setHasUnsavedChanges(true);
@@ -671,6 +693,28 @@ export default function App() {
     });
     setHasUnsavedChanges(true);
   };
+
+  const avatarInitials = useMemo(() => {
+    const base = ((personaData?.name || personaData?.title || '') as string).trim();
+    if (!base) return '•';
+    const parts = base.split(/\s+/).filter(Boolean);
+    const initials = parts
+      .slice(0, 2)
+      .map((p) => p[0]?.toUpperCase())
+      .join('');
+    return initials || '•';
+  }, [personaData?.name, personaData?.title]);
+
+  const personaCardInitials = useMemo(() => {
+    const base = (personaData?.name || '').trim();
+    if (!base) return '•';
+    const parts = base.split(/\s+/).filter(Boolean);
+    const initials = parts
+      .slice(0, 2)
+      .map((p) => p[0]?.toUpperCase())
+      .join('');
+    return initials || '•';
+  }, [personaData?.name]);
 
   const currentStep = state === 'initial' || state === 'processing' ? 1 : state === 'draft' ? 2 : 3;
   const step1Complete = state === 'draft' || state === 'finalized';
@@ -719,18 +763,9 @@ export default function App() {
                 fontWeight: 600,
               }}
               aria-label="Open profile menu"
-              title={personaData.name || personaData.title || 'Profile'}
+              title={personaData?.name || personaData?.title || 'Profile'}
             >
-              {(() => {
-                const base = (personaData.name || personaData.title || '').trim();
-                if (!base) return '•';
-                const parts = base.split(/\s+/).filter(Boolean);
-                const initials = parts
-                  .slice(0, 2)
-                  .map((p) => p[0]?.toUpperCase())
-                  .join('');
-                return initials || '•';
-              })()}
+              {avatarInitials}
             </button>
 
             <AnimatePresence>
@@ -1316,11 +1351,14 @@ export default function App() {
                     <div className="flex items-center gap-4 mb-6 pb-6" style={{ borderBottom: '1px solid #D1D5DB' }}>
                       <div className="relative group">
                         <input ref={profileImageInputRef} type="file" accept="image/*" onChange={handleProfileImageChange} className="hidden" />
-                        {personaData.profileImage ? (
+                        {personaData?.profileImage ? (
                           <img src={personaData.profileImage} alt="Profile" className="w-16 h-16 rounded-full object-cover flex-shrink-0" />
                         ) : (
-                          <div className="w-16 h-16 rounded-full flex items-center justify-center flex-shrink-0" style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '24px', fontWeight: 600 }}>
-                            {personaData.name.split(' ').map((n) => n[0]).join('')}
+                          <div
+                            className="w-16 h-16 rounded-full flex items-center justify-center flex-shrink-0"
+                            style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '24px', fontWeight: 600 }}
+                          >
+                            {personaCardInitials}
                           </div>
                         )}
                         {isEditable && (
@@ -1340,8 +1378,9 @@ export default function App() {
                           <>
                             <input
                               type="text"
-                              value={personaData.name}
+                              value={personaData?.name ?? ''}
                               onChange={(e) => {
+                                if (!personaData) return;
                                 setPersonaData({ ...personaData, name: e.target.value });
                                 setHasUnsavedChanges(true);
                               }}
@@ -1356,8 +1395,9 @@ export default function App() {
                             />
                             <input
                               type="text"
-                              value={personaData.title}
+                              value={personaData?.title ?? ''}
                               onChange={(e) => {
+                                if (!personaData) return;
                                 setPersonaData({ ...personaData, title: e.target.value });
                                 setHasUnsavedChanges(true);
                               }}
@@ -1372,8 +1412,8 @@ export default function App() {
                           </>
                         ) : (
                           <>
-                            <h4 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', marginBottom: '4px' }}>{personaData.name}</h4>
-                            <p style={{ fontSize: '14px', color: '#6B7280' }}>{personaData.title}</p>
+                            <h4 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', marginBottom: '4px' }}>{personaData?.name ?? ''}</h4>
+                            <p style={{ fontSize: '14px', color: '#6B7280' }}>{personaData?.title ?? ''}</p>
                           </>
                         )}
                       </div>
@@ -1397,8 +1437,9 @@ export default function App() {
                       </div>
                       {isEditable ? (
                         <textarea
-                          value={personaData.summary}
+                          value={personaData?.summary ?? ''}
                           onChange={(e) => {
+                            if (!personaData) return;
                             setPersonaData({ ...personaData, summary: e.target.value });
                             setHasUnsavedChanges(true);
                           }}
@@ -1413,7 +1454,7 @@ export default function App() {
                           }}
                         />
                       ) : (
-                        <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>{personaData.summary}</p>
+                        <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>{personaData?.summary ?? ''}</p>
                       )}
                     </div>
 
@@ -1421,7 +1462,7 @@ export default function App() {
                     <div className="mb-6">
                       <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Skills</h4>
                       <div className="flex flex-wrap gap-2">
-                        {personaData.skills.map((skill, idx) => (
+                        {(personaData?.skills ?? []).map((skill, idx) => (
                           <span
                             key={idx}
                             className="rounded-full px-3 py-1.5 flex items-center gap-2 group"
@@ -1500,7 +1541,7 @@ export default function App() {
                     <div className="mb-6">
                       <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Key Experiences</h4>
                       <div className="space-y-4">
-                        {personaData.experiences.map((exp) => (
+                        {(personaData?.experiences ?? []).map((exp) => (
                           <div key={exp.id} className="pb-4 group" style={{ borderBottom: '1px solid #D1D5DB' }}>
                             <div className="flex justify-between items-start mb-2">
                               <div className="flex-1">
@@ -1639,7 +1680,7 @@ export default function App() {
                     <div>
                       <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Career Highlights</h4>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {personaData.careerHighlights.map((highlight, idx) => (
+                        {(personaData?.careerHighlights ?? []).map((highlight, idx) => (
                           <div key={idx} className="p-3 rounded-lg border flex items-start gap-2" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
                             <Award size={16} style={{ color: '#14B8A6', marginTop: '2px', flexShrink: 0 }} />
                             <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5' }}>{highlight}</p>
