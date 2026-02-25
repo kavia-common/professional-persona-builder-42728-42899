@@ -106,8 +106,12 @@ export default function App() {
   const [newSkillValue, setNewSkillValue] = useState('');
   const [showSaveSuccess, setShowSaveSuccess] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const additionalFileInputRef = useRef<HTMLInputElement>(null);
   const profileImageInputRef = useRef<HTMLInputElement>(null);
   const newSkillInputRef = useRef<HTMLInputElement>(null);
+
+  // Track object URLs so we can revoke them (prevents memory leaks and long-term slowdowns/freezes).
+  const profileImageObjectUrlRef = useRef<string | null>(null);
 
   const initialPersonaFallback = useMemo<PersonaData>(
     () => ({
@@ -161,36 +165,43 @@ export default function App() {
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      const newFiles = Array.from(e.target.files);
-      addFiles(newFiles);
-    }
+    if (!e.target.files) return;
+
+    const newFiles = Array.from(e.target.files);
+
+    // Important: reset the input so selecting the same file again still fires onChange.
+    // This avoids users repeatedly clicking/dragging thinking nothing happened.
+    e.target.value = '';
+
+    addFiles(newFiles);
   };
 
   const addFiles = (files: File[]) => {
     setUploadError('');
     setBackendError('');
 
-    // Check if adding these files would exceed the limit
-    if (uploadedFiles.length + files.length > MAX_FILES) {
-      setUploadError(`Maximum ${MAX_FILES} documents allowed.`);
-      return;
-    }
-
-    // Validate all files
+    // Validate all files first (cheap) before touching state
     const invalidFiles = files.filter((file) => !validateFile(file));
     if (invalidFiles.length > 0) {
       setUploadError('Unsupported file format. Please upload PDF, DOCX, or TXT.');
       return;
     }
 
-    // Add valid files
-    const newUploadedFiles = files.map((file) => ({
-      id: Math.random().toString(36).substr(2, 9),
-      file,
-    }));
+    setUploadedFiles((prev) => {
+      // Check if adding these files would exceed the limit (based on latest state)
+      if (prev.length + files.length > MAX_FILES) {
+        // Setting state during an updater is okay; React will batch. This avoids stale closure.
+        setUploadError(`Maximum ${MAX_FILES} documents allowed.`);
+        return prev;
+      }
 
-    setUploadedFiles([...uploadedFiles, ...newUploadedFiles]);
+      const newUploadedFiles = files.map((file) => ({
+        id: Math.random().toString(36).substr(2, 9),
+        file,
+      }));
+
+      return [...prev, ...newUploadedFiles];
+    });
   };
 
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
@@ -206,7 +217,7 @@ export default function App() {
   };
 
   const removeFile = (id: string) => {
-    setUploadedFiles(uploadedFiles.filter((f) => f.id !== id));
+    setUploadedFiles((prev) => prev.filter((f) => f.id !== id));
     setUploadError('');
   };
 
@@ -412,21 +423,39 @@ export default function App() {
   };
 
   const handleProfileImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setPersonaData({
-          ...personaData,
-          profileImage: reader.result as string
-        });
-        setHasUnsavedChanges(true);
-      };
-      reader.readAsDataURL(file);
+    if (!e.target.files || !e.target.files[0]) return;
+
+    const file = e.target.files[0];
+
+    // Reset the input so selecting the same image again re-triggers onChange.
+    e.target.value = '';
+
+    // Revoke any previous object URL to prevent memory leaks.
+    if (profileImageObjectUrlRef.current) {
+      URL.revokeObjectURL(profileImageObjectUrlRef.current);
+      profileImageObjectUrlRef.current = null;
     }
+
+    const url = URL.createObjectURL(file);
+    profileImageObjectUrlRef.current = url;
+
+    setPersonaData((prev) => ({
+      ...prev,
+      profileImage: url,
+    }));
+    setHasUnsavedChanges(true);
   };
 
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      if (profileImageObjectUrlRef.current) {
+        URL.revokeObjectURL(profileImageObjectUrlRef.current);
+        profileImageObjectUrlRef.current = null;
+      }
+    };
+  }, []);
 
   const removeExperience = (id: string) => {
     setPersonaData({
@@ -1012,15 +1041,15 @@ export default function App() {
                       {uploadedFiles.length < MAX_FILES && (
                         <>
                           <input
+                            ref={additionalFileInputRef}
                             type="file"
                             accept=".pdf,.docx,.txt"
                             multiple
                             onChange={handleFileChange}
                             className="hidden"
-                            id="additional-upload"
                           />
                           <button
-                            onClick={() => document.getElementById('additional-upload')?.click()}
+                            onClick={() => additionalFileInputRef.current?.click()}
                             className="w-full flex items-center justify-center gap-2 rounded-lg border-2 border-dashed p-3 transition-colors hover:bg-gray-50"
                             style={{
                               borderColor: '#D1D5DB',
