@@ -101,7 +101,6 @@ export default function App() {
 
   const [isEditable, setIsEditable] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-  const [isHoveringHeading, setIsHoveringHeading] = useState(false);
   const [isAddingSkill, setIsAddingSkill] = useState(false);
   const [newSkillValue, setNewSkillValue] = useState('');
   const [showSaveSuccess, setShowSaveSuccess] = useState(false);
@@ -109,6 +108,25 @@ export default function App() {
   const additionalFileInputRef = useRef<HTMLInputElement>(null);
   const profileImageInputRef = useRef<HTMLInputElement>(null);
   const newSkillInputRef = useRef<HTMLInputElement>(null);
+
+  // Guard against accidental recursive/rapid click triggering which can hang the browser in some cases.
+  const isTriggeringFileDialogRef = useRef(false);
+
+  const triggerFileDialog = (ref: React.RefObject<HTMLInputElement>) => {
+    if (isTriggeringFileDialogRef.current) return;
+    const el = ref.current;
+    if (!el) return;
+
+    isTriggeringFileDialogRef.current = true;
+    try {
+      el.click();
+    } finally {
+      // Release on next tick so React event bubbling finishes first.
+      window.setTimeout(() => {
+        isTriggeringFileDialogRef.current = false;
+      }, 0);
+    }
+  };
 
   // Track object URLs so we can revoke them (prevents memory leaks and long-term slowdowns/freezes).
   const profileImageObjectUrlRef = useRef<string | null>(null);
@@ -645,36 +663,20 @@ export default function App() {
             transition={{ duration: 0.3 }}
             className="max-w-2xl mx-auto text-center"
           >
-            <motion.h2 
+            <motion.h2
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.3, delay: 0.1 }}
-              onMouseEnter={() => setIsHoveringHeading(true)}
-              onMouseLeave={() => setIsHoveringHeading(false)}
               className="relative inline-block cursor-default"
-              style={{ 
-                fontSize: '36px', 
-                fontWeight: 700, 
-                color: '#14B8A6', 
+              style={{
+                fontSize: '36px',
+                fontWeight: 700,
+                color: '#14B8A6',
                 marginBottom: '8px',
-                transition: 'color 0.3s ease'
+                transition: 'color 0.3s ease',
               }}
             >
-              View Current State Persona
-              <motion.div
-                initial={{ scaleX: 0 }}
-                animate={{ scaleX: isHoveringHeading ? 1 : 0 }}
-                transition={{ duration: 0.3 }}
-                style={{
-                  position: 'absolute',
-                  bottom: '-4px',
-                  left: 0,
-                  right: 0,
-                  height: '2px',
-                  backgroundColor: '#14B8A6',
-                  transformOrigin: 'left'
-                }}
-              />
+              <span className="upload-heading-underline">View Current State Persona</span>
             </motion.h2>
             <p style={{ fontSize: '16px', color: '#6B7280', marginBottom: '32px' }}>
               Upload your Professional Documents to generate your AI-powered Persona
@@ -705,13 +707,13 @@ export default function App() {
                 className="hidden"
               />
               <div
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => triggerFileDialog(fileInputRef)}
                 onDrop={handleDrop}
                 onDragOver={handleDragOver}
                 className="border-2 border-dashed rounded-xl p-12 cursor-pointer transition-colors hover:bg-gray-50"
-                style={{ 
+                style={{
                   borderColor: '#D1D5DB',
-                  backgroundColor: uploadedFiles.length > 0 ? 'rgba(20, 184, 166, 0.05)' : 'transparent'
+                  backgroundColor: uploadedFiles.length > 0 ? 'rgba(20, 184, 166, 0.05)' : 'transparent',
                 }}
               >
                 <Upload 

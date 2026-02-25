@@ -40,3 +40,26 @@
 
 /* Optional animation utilities provided by dependency `tw-animate-css`. */
 @import 'tw-animate-css';
+
+/* Upload heading underline: avoids motion/state updates on mousemove/hover. */
+.upload-heading-underline {
+  position: relative;
+  display: inline-block;
+}
+
+.upload-heading-underline::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -4px;
+  height: 2px;
+  background: #14B8A6;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 200ms ease;
+}
+
+.upload-heading-underline:hover::after {
+  transform: scaleX(1);
+}
