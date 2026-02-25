@@ -1,3 +1,19 @@
+/*
+  Global stylesheet entrypoint.
+
+  IMPORTANT:
+  Tailwind layer directives must be registered before any files that use
+  `@layer base` (e.g. theme.css). Some build pipelines inline/reorder CSS
+  imports; placing `@tailwind base/components/utilities` here guarantees the
+  layers exist before theme.css is processed.
+*/
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 @import './fonts.css';
-@import './tailwind.css';
 @import './theme.css';
+
+/* Optional animation utilities provided by dependency `tw-animate-css`. */
+@import 'tw-animate-css';
