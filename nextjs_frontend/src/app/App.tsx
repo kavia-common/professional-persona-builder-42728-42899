@@ -381,10 +381,11 @@ export default function App() {
       try {
         inputRef.current?.click();
       } finally {
-        // Release on next macrotask to avoid same-tick re-entry.
+        // Release after 500ms (instead of 0ms) to let the OS file dialog stabilize.
+        // This reduces the chance of rapid double-clicks or re-entrant events that can hang Chrome.
         setTimeout(() => {
           isOpeningFilePickerRef.current = false;
-        }, 0);
+        }, 500);
       }
     },
     []
@@ -1096,12 +1097,26 @@ export default function App() {
                 transition: 'color 0.3s ease',
               }}
             >
-              <span className="upload-heading-underline">View Current State Persona</span>
+              <motion.span
+                layoutId="underline"
+                animate={state === 'processing' ? { opacity: 0.5 } : { opacity: 1 }}
+                className="upload-heading-underline"
+              >
+                View Current State Persona
+              </motion.span>
             </motion.h2>
             <p style={{ fontSize: '16px', color: '#6B7280', marginBottom: '32px' }}>Upload your Professional Documents to generate your AI-powered Persona</p>
 
             {/* Keep the file input OUTSIDE the clickable dropzone to avoid self-trigger loops */}
-            <input ref={fileInputRef} type="file" accept=".pdf,.docx,.txt" multiple onChange={handleFileChange} className="hidden" />
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".pdf,.docx,.txt"
+              onChange={handleFileChange}
+              style={{ display: 'none', position: 'absolute', pointerEvents: 'none' }}
+              tabIndex={-1}
+            />
 
             <div
               className="bg-white rounded-xl p-8 transition-all duration-300 group"
