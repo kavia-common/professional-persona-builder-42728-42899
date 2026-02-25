@@ -150,6 +150,10 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
     // REQUIRED by task (exact new location)
     ['artifacts', 'output', 'personaJson'],
 
+    // REQUIRED by task: artifacts may store draft/final persona directly
+    ['artifacts', 'draftPersona'],
+    ['artifacts', 'finalPersona'],
+
     // Additional observed/legacy possibilities (keep these for robustness)
     ['artifacts', 'personaJson'],
     ['artifacts', 'final', 'personaJson'],
@@ -753,19 +757,14 @@ export default function App() {
           /**
            * Render-loop freeze fix:
            * Only update state if the computed PersonaData is meaningfully different.
+           *
+           * We intentionally use JSON.stringify (not the pretty-print helper) to be as strict as possible
+           * and avoid any repeated updates that can be triggered by subtle object identity churn.
            */
           const current = prev ?? initialPersonaFallback;
           const coerced = coercePersonaDataFromBackendJson(personaJson, current);
 
-          const prevJson = safeJsonStringify(current);
-          const nextJson = safeJsonStringify(coerced);
-
-          if (prevJson === nextJson) {
-            console.log(
-              `[artifacts][gen:${generationId}] personaData unchanged (JSON diff equal); skipping setPersonaData to avoid render loop`
-            );
-            return prev;
-          }
+          if (JSON.stringify(coerced) === JSON.stringify(current)) return prev;
 
           console.log(`[artifacts][gen:${generationId}] personaData updated from backend artifacts (JSON diff changed)`);
           return coerced;
@@ -787,11 +786,8 @@ export default function App() {
 
   // Load versions whenever personaId becomes available.
   useEffect(() => {
-    // Guard: avoid backend 400s from undefined/empty IDs.
-    if (!personaId || typeof personaId !== 'string' || personaId.trim().length === 0) {
-      console.log('[versions] personaId not available yet; skipping versions fetch', { personaId });
-      return;
-    }
+    // Guard: avoid backend 400s from undefined/empty/"null" IDs.
+    if (!personaId || personaId === 'null') return;
     refreshVersions(personaId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [personaId]);
