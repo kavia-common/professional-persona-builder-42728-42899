@@ -346,15 +346,8 @@ export default function App() {
         console.log(`[draft][gen:${generationId}] uploadDocuments raw response:`, uploadResp);
       });
 
-      console.log(`[draft][gen:${generationId}] calling orchestrationRunAll request:`, {
-        mode: 'persona_build',
-        useLatestCategoryDocs: true,
-        autoCreatePersona: true,
-        generate: { saveDraft: true, createVersion: true },
-      });
-
-      const runAll = await orchestrationRunAll({
-        mode: 'persona_build',
+      const runAllRequest = {
+        mode: 'persona_build' as const,
         // Leave userId null for now; backend supports null userId in scaffold.
         useLatestCategoryDocs: true,
         autoCreatePersona: true,
@@ -362,9 +355,15 @@ export default function App() {
           saveDraft: true,
           createVersion: true,
         },
-      });
+      };
 
-      console.log(`[draft][gen:${generationId}] orchestrationRunAll raw response:`, runAll);
+      // Requested explicit logging for the orchestration call.
+      console.log(`[orchestrationRunAll][gen:${generationId}] request:`, runAllRequest);
+
+      const runAll = await orchestrationRunAll(runAllRequest);
+
+      // Requested explicit logging for the orchestration response.
+      console.log(`[orchestrationRunAll][gen:${generationId}] response:`, runAll);
 
       setBuildId(runAll.build.id);
       setPersonaId(runAll.results.generate.personaId ?? null);
@@ -391,9 +390,18 @@ export default function App() {
         setState('processing');
       }
     } catch (e: any) {
-      console.error(`[draft][gen:${generationId}] generate draft failed`, e);
-      setState('initial');
-      setBackendError(e?.message || 'Failed to generate draft persona.');
+      // Surface backend errors in UI (including payload details) instead of silently resetting.
+      const payloadMsg =
+        e?.payload && typeof e.payload === 'object' && e.payload !== null
+          ? e.payload?.message || e.payload?.error
+          : null;
+
+      const message = payloadMsg || e?.message || 'Failed to generate draft persona.';
+      console.error(`[draft][gen:${generationId}] generate draft failed`, { message, error: e });
+
+      setBackendError(message);
+      // Keep user in processing view so they can see the error banner in the left column.
+      setState('processing');
     }
   };
 
@@ -480,15 +488,24 @@ export default function App() {
             status
           );
           setBackendError(status.message || `Build ${status.status}.`);
-          setState('initial');
+          // Keep the processing screen visible so the user sees the backend error banner.
+          setState('processing');
         } else {
           // queued/running: stay in processing
         }
       } catch (e: any) {
         if (cancelled) return;
-        console.error(`[poll][gen:${generationId}] polling error`, e);
-        setBackendError(e?.message || 'Failed to poll build status.');
-        setState('initial');
+        const payloadMsg =
+          e?.payload && typeof e.payload === 'object' && e.payload !== null
+            ? e.payload?.message || e.payload?.error
+            : null;
+
+        const message = payloadMsg || e?.message || 'Failed to poll build status.';
+        console.error(`[poll][gen:${generationId}] polling error`, { message, error: e });
+
+        setBackendError(message);
+        // Keep the processing screen visible so the user sees the backend error banner.
+        setState('processing');
       }
     }, 800);
 
@@ -513,7 +530,13 @@ export default function App() {
     (async () => {
       try {
         const { getOrchestrationByBuild } = await import('../lib/apiClient');
+
+        // Requested explicit logging for orchestration artifact fetch.
+        console.log(`[getOrchestrationByBuild][gen:${generationId}] request:`, { buildId });
+
         const orch = await getOrchestrationByBuild(buildId);
+
+        console.log(`[getOrchestrationByBuild][gen:${generationId}] response:`, orch);
 
         console.log(`[artifacts][gen:${generationId}] getOrchestrationByBuild raw response:`, orch);
 
