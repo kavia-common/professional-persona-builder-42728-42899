@@ -127,65 +127,56 @@ function inferDraftFromOrchestrationRecord(orch: any): any | null {
 
 function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaData): PersonaData {
   /**
-   * Attempt to map the backend "PersonaDraft" into this UI's legacy PersonaData fields.
-   * If fields aren't present, we keep the existing fallback.
+   * Attempt to map backend persona JSON into this UI's legacy PersonaData fields.
    *
-   * IMPORTANT: This method now logs:
-   * - the raw persona JSON (sanitized via stringify)
-   * - warnings when expected fields are missing and we fall back
+   * The backend structure observed in logs is:
+   * - professional_summary: string
+   * - core_competencies: string[]
+   * - career_highlights: Array<{ text: string, source?: string, ... }>
+   * - technical_stack: { tools: string[] }
+   *
+   * We also keep compatibility with the older PersonaDraft fields if present (title, profile.headline),
+   * but the requested stability fix is primarily about mapping the correct fields above.
    */
   console.log('[persona][coerce] raw personaJson:', personaJson);
 
   try {
+    // These are optional in the backend schema we observed, but keep them as best-effort enhancements.
     const titleCandidate = personaJson?.title;
     const title = typeof titleCandidate === 'string' && titleCandidate.trim().length > 0 ? titleCandidate : fallback.title;
-    if (title === fallback.title && titleCandidate !== undefined) {
-      console.warn('[persona][coerce] title missing/invalid; falling back to previous title. titleCandidate=', titleCandidate);
-    }
 
     const headlineCandidate = personaJson?.profile?.headline;
-    const nameFromTitle =
+    const nameFromHeadline =
       typeof headlineCandidate === 'string' && headlineCandidate.trim().length > 0 ? headlineCandidate : fallback.name;
-    if (nameFromTitle === fallback.name && headlineCandidate !== undefined) {
-      console.warn(
-        '[persona][coerce] profile.headline missing/invalid; falling back to previous name. headlineCandidate=',
-        headlineCandidate
-      );
-    }
 
-    const summaryCandidate = personaJson?.summary;
+    // REQUIRED mappings per user instructions
+    const summaryCandidate = personaJson?.professional_summary;
     const summary =
       typeof summaryCandidate === 'string' && summaryCandidate.trim().length > 0 ? summaryCandidate : fallback.summary;
-    if (summary === fallback.summary && summaryCandidate !== undefined) {
-      console.warn(
-        '[persona][coerce] summary missing/invalid; falling back to previous summary. summaryCandidate=',
-        summaryCandidate
-      );
-    }
 
-    const skills = asStringArray(personaJson?.skills);
-    if (skills.length === 0 && personaJson?.skills !== undefined) {
-      console.warn(
-        '[persona][coerce] skills missing/invalid/empty; falling back to previous skills. skillsCandidate=',
-        personaJson?.skills
-      );
-    }
+    const skillsCandidate = personaJson?.core_competencies;
+    const skills = asStringArray(skillsCandidate);
 
-    const experienceHighlights = asStringArray(personaJson?.experienceHighlights);
-    if (experienceHighlights.length === 0 && personaJson?.experienceHighlights !== undefined) {
-      console.warn(
-        '[persona][coerce] experienceHighlights missing/invalid/empty; falling back to previous careerHighlights. candidate=',
-        personaJson?.experienceHighlights
-      );
-    }
+    const highlightsCandidate = personaJson?.career_highlights;
+    const careerHighlights =
+      Array.isArray(highlightsCandidate)
+        ? (highlightsCandidate
+            .map((h) => (h && typeof h === 'object' ? (h as any).text : null))
+            .filter((t) => typeof t === 'string' && t.trim().length > 0) as string[])
+        : [];
+
+    const toolsCandidate = personaJson?.technical_stack?.tools;
+    const tools = asStringArray(toolsCandidate);
 
     const result: PersonaData = {
       ...fallback,
-      name: nameFromTitle,
+      // Keep any existing name/title if backend doesn't provide them
+      name: nameFromHeadline,
       title,
       summary,
       skills: skills.length > 0 ? skills : fallback.skills,
-      careerHighlights: experienceHighlights.length > 0 ? experienceHighlights : fallback.careerHighlights,
+      careerHighlights: careerHighlights.length > 0 ? careerHighlights : fallback.careerHighlights,
+      tools: tools.length > 0 ? tools : fallback.tools,
     };
 
     console.log('[persona][coerce] result PersonaData:', result);
@@ -677,30 +668,28 @@ export default function App() {
         console.log(`[artifacts][gen:${generationId}] draft persona extracted (pre-coerce):`, maybeDraft);
 
         setPersonaData((prev) => {
-          const fallback = prev ?? initialPersonaFallback;
-          const coerced = coercePersonaDataFromBackendJson(maybeDraft, fallback);
+          /**
+           * Crucial stability fix (per user request):
+           * Only update personaData from backend artifacts ONCE, while personaData is still the fallback.
+           *
+           * Why: repeated state updates from this effect can cause render churn/freezes if the upstream
+           * artifact fetch is re-triggered (or if the coerced object changes identity frequently).
+           *
+           * We consider "still fallback" when the summary is still equal to the initial fallback summary.
+           * (The initial fallback is empty string in this app.)
+           */
+          const current = prev ?? initialPersonaFallback;
 
-          // Guard requested by user: avoid updating state if draft yields effectively same personaData.
-          // This prevents effect-driven update loops when artifacts are fetched repeatedly.
-          if (JSON.stringify(coerced) === JSON.stringify(prev ?? initialPersonaFallback)) {
-            console.log(`[artifacts][gen:${generationId}] personaData unchanged; skipping setPersonaData update`);
+          const isStillFallback = current.summary === initialPersonaFallback.summary;
+          if (!isStillFallback) {
+            console.log(
+              `[artifacts][gen:${generationId}] personaData already populated (not fallback); skipping state update to avoid loops`
+            );
             return prev;
           }
 
-          // Extra diagnostics
-          if (prev) {
-            const prevSummaryLocal = prev?.summary;
-            const nextSummaryLocal = coerced?.summary;
-            if (prevSummaryLocal === nextSummaryLocal) {
-              console.warn(
-                `[artifacts][gen:${generationId}] coercion did not change summary; possible fallback usage. prevSummaryLen=`,
-                prevSummaryLocal?.length,
-                'nextSummaryLen=',
-                nextSummaryLocal?.length
-              );
-            }
-          }
-
+          const coerced = coercePersonaDataFromBackendJson(maybeDraft, current);
+          console.log(`[artifacts][gen:${generationId}] personaData populated from backend artifacts`);
           return coerced;
         });
       } catch (err) {
