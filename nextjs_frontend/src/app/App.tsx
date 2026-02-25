@@ -13,7 +13,10 @@ import {
   type UUID,
 } from '../lib/apiClient';
 
-const bgImage = '/assets/24fa192a7a1db10ae3078a00cc00f09e2f26b6de.png';
+/**
+ * Background image was previously referencing a non-existent asset, causing repeated 404s.
+ * Keep the page background purely CSS-based to avoid network churn and potential UI slowdowns.
+ */
 
 type AppState = 'initial' | 'processing' | 'draft' | 'finalized';
 
@@ -494,14 +497,11 @@ export default function App() {
   };
 
   return (
-    <div 
+    <div
       className="min-h-screen"
       style={{
-        backgroundImage: `url(${bgImage})`,
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-        backgroundRepeat: 'no-repeat',
-        fontFamily: 'Inter, sans-serif'
+        background: 'linear-gradient(180deg, rgba(79, 70, 229, 0.06) 0%, #F9FAFB 55%, #F9FAFB 100%)',
+        fontFamily: 'Inter, sans-serif',
       }}
     >
       {/* Header */}
@@ -682,12 +682,22 @@ export default function App() {
               Upload your Professional Documents to generate your AI-powered Persona
             </p>
 
-            <div 
+            {/* Keep the file input OUTSIDE the clickable dropzone to avoid self-trigger loops */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.docx,.txt"
+              multiple
+              onChange={handleFileChange}
+              className="hidden"
+            />
+
+            <div
               className="bg-white rounded-xl p-8 transition-all duration-300 group"
-              style={{ 
+              style={{
                 boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.05)',
                 marginBottom: '24px',
-                border: '1px solid rgba(20, 184, 166, 0.3)'
+                border: '1px solid rgba(20, 184, 166, 0.3)',
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.border = '1px solid #14B8A6';
@@ -698,33 +708,29 @@ export default function App() {
                 e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
               }}
             >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf,.docx,.txt"
-                multiple
-                onChange={handleFileChange}
-                className="hidden"
-              />
               <div
-                onClick={() => triggerFileDialog(fileInputRef)}
-                onDrop={handleDrop}
-                onDragOver={handleDragOver}
+                onClick={(e) => {
+                  // Prevent any nested click handlers (e.g., remove buttons) from bubbling back into the dropzone click.
+                  e.stopPropagation();
+                  triggerFileDialog(fileInputRef);
+                }}
+                onDrop={(e) => {
+                  e.stopPropagation();
+                  handleDrop(e);
+                }}
+                onDragOver={(e) => {
+                  e.stopPropagation();
+                  handleDragOver(e);
+                }}
                 className="border-2 border-dashed rounded-xl p-12 cursor-pointer transition-colors hover:bg-gray-50"
                 style={{
                   borderColor: '#D1D5DB',
                   backgroundColor: uploadedFiles.length > 0 ? 'rgba(20, 184, 166, 0.05)' : 'transparent',
                 }}
               >
-                <Upload 
-                  className="mx-auto mb-4" 
-                  size={48} 
-                  style={{ color: '#14B8A6' }}
-                />
+                <Upload className="mx-auto mb-4" size={48} style={{ color: '#14B8A6' }} />
                 <p style={{ fontSize: '16px', fontWeight: 500, color: '#1F2937', marginBottom: '8px' }}>
-                  {uploadedFiles.length > 0 
-                    ? `${uploadedFiles.length} file(s) uploaded` 
-                    : 'Upload your Documents '}
+                  {uploadedFiles.length > 0 ? `${uploadedFiles.length} file(s) uploaded` : 'Upload your Documents '}
                 </p>
                 <p style={{ fontSize: '14px', color: '#6B7280' }}>
                   Resume, Job Description, Performance Review, Certifications
@@ -735,14 +741,14 @@ export default function App() {
               </div>
 
               {uploadError && (
-                <motion.p 
+                <motion.p
                   initial={{ opacity: 0, y: -10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  style={{ 
-                    fontSize: '14px', 
-                    color: '#DC2626', 
+                  style={{
+                    fontSize: '14px',
+                    color: '#DC2626',
                     marginTop: '12px',
-                    textAlign: 'center'
+                    textAlign: 'center',
                   }}
                 >
                   {uploadError}
@@ -760,13 +766,17 @@ export default function App() {
                     <div
                       key={fileData.id}
                       className="flex items-center justify-between p-3 rounded-lg bg-gray-50 hover:bg-gray-100 transition-colors"
+                      onClick={(e) => {
+                        // This row should not re-open the file picker if clicked.
+                        e.stopPropagation();
+                      }}
                     >
                       <div className="flex items-center gap-3">
-                        <span 
+                        <span
                           className="px-2 py-1 rounded text-xs font-medium"
-                          style={{ 
+                          style={{
                             backgroundColor: 'rgba(20, 184, 166, 0.1)',
-                            color: '#14B8A6'
+                            color: '#14B8A6',
                           }}
                         >
                           {getFileType(fileData.file.name)}
@@ -777,6 +787,7 @@ export default function App() {
                       </div>
                       <button
                         onClick={(e) => {
+                          // Critical: stop bubbling so the parent dropzone doesn't re-trigger file dialog.
                           e.stopPropagation();
                           removeFile(fileData.id);
                         }}
