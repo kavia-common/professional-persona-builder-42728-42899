@@ -804,7 +804,7 @@ export default function App() {
 
         const { personaJson } = extractPersonaJsonFromOrchestrationRecord(orch);
 
-        // Only proceed if we have a real object with keys
+        // Only proceed if personaJson is a real object with keys
         if (personaJson && typeof personaJson === 'object' && Object.keys(personaJson).length > 0) {
           const artifactJson = safeJsonStringify(personaJson);
 
@@ -1095,16 +1095,16 @@ export default function App() {
                 transition: 'color 0.3s ease',
               }}
             >
+              View Current State Persona
               <motion.span
                 className="upload-heading-underline"
                 initial={{ width: 0 }}
                 animate={{ width: '100%' }}
                 transition={{ duration: 0.5, ease: 'easeOut' }}
-                // Ensure it doesn't re-animate on every state change
+                // Adding a static key prevents Framer Motion from re-calculating layout transitions
+                // when the parent state changes.
                 key="static-underline"
-              >
-                View Current State Persona
-              </motion.span>
+              />
             </motion.h2>
             <p style={{ fontSize: '16px', color: '#6B7280', marginBottom: '32px' }}>Upload your Professional Documents to generate your AI-powered Persona</p>
 
@@ -1115,14 +1115,13 @@ export default function App() {
               multiple
               accept=".pdf,.docx,.txt"
               onChange={handleFileChange}
-              /* STYLES TO PREVENT LAYOUT SHIFT: */
               style={{
                 display: 'none',
-                position: 'fixed',
+                position: 'fixed', // Use fixed to remove it from the document flow
                 top: '-1000px',
                 left: '-1000px',
               }}
-              tabIndex={-1}
+              tabIndex={-1} // Prevents accidental focus loops
             />
 
             <div
@@ -1461,7 +1460,20 @@ export default function App() {
 
                       {uploadedFiles.length < MAX_FILES && (
                         <>
-                          <input ref={additionalFileInputRef} type="file" accept=".pdf,.docx,.txt" multiple onChange={handleFileChange} className="hidden" />
+                          <input
+                            ref={additionalFileInputRef}
+                            type="file"
+                            multiple
+                            accept=".pdf,.docx,.txt"
+                            onChange={handleFileChange}
+                            style={{
+                              display: 'none',
+                              position: 'fixed',
+                              top: '-1000px',
+                              left: '-1000px',
+                            }}
+                            tabIndex={-1}
+                          />
                           <button
                             onClick={(e) => openHiddenFileInput(additionalFileInputRef, e)}
                             className="w-full flex items-center justify-center gap-2 rounded-lg border-2 border-dashed p-3 transition-colors hover:bg-gray-50"
@@ -1581,7 +1593,19 @@ export default function App() {
                     {/* Persona Header */}
                     <div className="flex items-center gap-4 mb-6 pb-6" style={{ borderBottom: '1px solid #D1D5DB' }}>
                       <div className="relative group">
-                        <input ref={profileImageInputRef} type="file" accept="image/*" onChange={handleProfileImageChange} className="hidden" />
+                        <input
+                          ref={profileImageInputRef}
+                          type="file"
+                          accept="image/*"
+                          onChange={handleProfileImageChange}
+                          style={{
+                            display: 'none',
+                            position: 'fixed',
+                            top: '-1000px',
+                            left: '-1000px',
+                          }}
+                          tabIndex={-1}
+                        />
                         {personaData?.profileImage ? (
                           <img src={personaData.profileImage} alt="Profile" className="w-16 h-16 rounded-full object-cover flex-shrink-0" />
                         ) : (
