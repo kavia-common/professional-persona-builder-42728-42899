@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Upload, Loader2, X, Edit3, Plus, CheckCircle2, Camera, Award, Compass } from 'lucide-react';
+import { Upload, Loader2, X, Edit3, Plus, CheckCircle2, Camera, Award, Compass, User } from 'lucide-react';
 import {
   getBuildStatus,
   listPersonaVersions,
@@ -28,6 +28,15 @@ interface Experience {
   description: string;
 }
 
+interface CareerHighlight {
+  highlight: string;
+  /**
+   * Optional “where this came from” string shown under the highlight.
+   * Examples: “Senior Product Manager, Acme (2021–2024)”, “Resume”, “Performance Review”, etc.
+   */
+  sourceExperience?: string;
+}
+
 /**
  * UI Persona shape (legacy from the integrated template).
  * Backend persona JSON is currently represented/stored as arbitrary JSON and/or as a strict PersonaDraft.
@@ -44,7 +53,13 @@ interface PersonaData {
   tools: string[];
   industries: string[];
   yearsOfExperience: string;
-  careerHighlights: string[];
+
+  /**
+   * Career highlights enriched with optional “source experience”.
+   * NOTE: backend drafts may still return string arrays; we map them into objects.
+   */
+  careerHighlights: CareerHighlight[];
+
   profileImage?: string;
 }
 
@@ -287,12 +302,13 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
    * 1) "Legacy/current state" persona JSON keys:
    *    - professional_summary (string)
    *    - core_competencies (string[])
-   *    - career_highlights (string[] | {text:string}[])
+   *    - career_highlights (string[] | {text:string, source_experience?: string}[])
+   *    - name/title-like fields may appear as: name, title, role, headline, etc.
    *
    * 2) OpenAPI PersonaDraft shape (POST /ai/personas/generate and orchestration generate-draft):
-   *    - title (string)
+   *    - title (string)                      (often the person’s display name in our UX expectation)
    *    - summary (string)
-   *    - profile.headline (string)
+   *    - profile.headline (string)           (often role/headline)
    *    - skills (string[])
    *    - experienceHighlights (string[])
    *
@@ -301,7 +317,7 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
    * - personaData.title is displayed as the role/title line.
    * - personaData.summary feeds "Professional Summary".
    * - personaData.skills feeds "Skills".
-   * - personaData.careerHighlights feeds "Career Highlights".
+   * - personaData.careerHighlights feeds "Career Highlights" (with optional source experience).
    */
   // eslint-disable-next-line no-console
   console.log('[persona][coerce] raw personaJson:', personaJson);
@@ -309,31 +325,76 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
   try {
     const coercedSkills = asStringArray(personaJson?.core_competencies ?? personaJson?.skills);
 
-    const coerceHighlights = (value: unknown): string[] => {
+    const coerceHighlights = (value: unknown): CareerHighlight[] => {
       if (!Array.isArray(value)) return [];
+
       return (value as any[])
         .map((h) => {
-          if (typeof h === 'string') return h;
-          if (typeof h === 'object' && h !== null) {
-            // Support { text: string } and a few other defensive variants.
-            const text = (h as any).text ?? (h as any).value ?? (h as any).highlight;
-            return typeof text === 'string' ? text : '';
+          // Common case: highlight is just a string.
+          if (typeof h === 'string') {
+            const highlight = h.trim();
+            return highlight ? ({ highlight } satisfies CareerHighlight) : null;
           }
-          return '';
+
+          // Rich object case: accept multiple potential key conventions.
+          if (typeof h === 'object' && h !== null) {
+            const highlightRaw = (h as any).highlight ?? (h as any).text ?? (h as any).value ?? (h as any).career_highlight;
+            const sourceRaw =
+              (h as any).sourceExperience ??
+              (h as any).source_experience ??
+              (h as any).source ??
+              (h as any).experience ??
+              (h as any).role ??
+              null;
+
+            const highlight = typeof highlightRaw === 'string' ? highlightRaw.trim() : '';
+            const sourceExperience = typeof sourceRaw === 'string' ? sourceRaw.trim() : undefined;
+
+            if (!highlight) return null;
+
+            return {
+              highlight,
+              sourceExperience: sourceExperience && sourceExperience.length > 0 ? sourceExperience : undefined,
+            } satisfies CareerHighlight;
+          }
+
+          return null;
         })
-        .filter((v) => typeof v === 'string' && v.trim().length > 0) as string[];
+        .filter(Boolean) as CareerHighlight[];
     };
 
     // PersonaDraft uses experienceHighlights; legacy uses career_highlights.
     const coercedHighlights =
-      coerceHighlights(personaJson?.experienceHighlights) || coerceHighlights(personaJson?.career_highlights);
+      coerceHighlights(personaJson?.career_highlights).length > 0
+        ? coerceHighlights(personaJson?.career_highlights)
+        : coerceHighlights(personaJson?.experienceHighlights);
+
+    // Name/title mapping:
+    // - For PersonaDraft, "title" is described as persona title; many backends use it as display label.
+    // - "profile.headline" is a better match for "role/headline" in the UI.
+    const derivedName =
+      personaJson?.name ??
+      personaJson?.full_name ??
+      personaJson?.fullName ??
+      personaJson?.user_name ??
+      personaJson?.userName ??
+      personaJson?.title ??
+      fallback.name;
+
+    const derivedTitle =
+      personaJson?.role ??
+      personaJson?.headline ??
+      personaJson?.profile?.headline ??
+      personaJson?.current_role ??
+      personaJson?.currentRole ??
+      fallback.title;
 
     const next: PersonaData = {
       ...fallback,
 
-      // Map live backend keys to UI state keys
-      name: personaJson?.profile?.headline || personaJson?.name || fallback.name,
-      title: personaJson?.title || fallback.title,
+      name: typeof derivedName === 'string' ? derivedName : fallback.name,
+      title: typeof derivedTitle === 'string' ? derivedTitle : fallback.title,
+
       summary: personaJson?.professional_summary ?? personaJson?.summary ?? fallback.summary,
       skills: coercedSkills.length > 0 ? coercedSkills : fallback.skills,
 
@@ -958,7 +1019,9 @@ export default function App() {
       p.title ?? '',
       p.summary ?? '',
       (p.skills ?? []).join('|'),
-      (p.careerHighlights ?? []).join('|'),
+      (p.careerHighlights ?? [])
+        .map((h) => `${h.highlight ?? ''}@@${h.sourceExperience ?? ''}`)
+        .join('|'),
       String((p.experiences ?? []).length),
     ].join('::');
   }
@@ -1300,7 +1363,32 @@ export default function App() {
             >
               <Compass size={20} style={{ color: 'white' }} />
             </div>
-            <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', margin: 0 }}>Career Navigator</h1>
+
+            <div className="flex flex-col">
+              <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', margin: 0 }}>Career Navigator</h1>
+
+              {/* "This is your profile" indicator + name/role */}
+              <div className="flex items-center gap-2" style={{ marginTop: '2px' }}>
+                <span
+                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5"
+                  style={{
+                    backgroundColor: 'rgba(20, 184, 166, 0.10)',
+                    color: '#0F766E',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                  }}
+                  aria-label="Your profile"
+                  title="Your profile"
+                >
+                  <User size={14} />
+                  Your Profile
+                </span>
+
+                <span style={{ fontSize: '12px', color: '#6B7280', fontWeight: 500 }}>
+                  {(personaName || '—') + (personaTitle ? ` · ${personaTitle}` : '')}
+                </span>
+              </div>
+            </div>
           </div>
 
           {/* RIGHT - Profile Circle */}
@@ -1315,7 +1403,7 @@ export default function App() {
                 fontWeight: 600,
               }}
               aria-label="Open profile menu"
-              title={personaName || personaTitle || 'Profile'}
+              title={personaName || personaTitle || 'Your profile'}
             >
               {avatarInitials}
             </button>
@@ -2293,14 +2381,44 @@ export default function App() {
                     {/* Career Highlights */}
                     <div>
                       <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Career Highlights</h4>
+
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {(personaData?.careerHighlights ?? []).map((highlight, idx) => (
-                          <div key={idx} className="p-3 rounded-lg border flex items-start gap-2" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
+                        {(personaData?.careerHighlights ?? []).map((item, idx) => (
+                          <div
+                            key={`${idx}-${item.highlight}`}
+                            className="p-3 rounded-lg border flex items-start gap-2"
+                            style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}
+                          >
                             <Award size={16} style={{ color: '#14B8A6', marginTop: '2px', flexShrink: 0 }} />
-                            <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5' }}>{highlight}</p>
+                            <div className="min-w-0">
+                              <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5', marginBottom: item.sourceExperience ? '6px' : 0 }}>
+                                {item.highlight}
+                              </p>
+
+                              {item.sourceExperience && (
+                                <div
+                                  className="inline-flex items-center rounded-md px-2 py-1"
+                                  style={{
+                                    backgroundColor: 'rgba(20, 184, 166, 0.10)',
+                                    border: '1px solid rgba(20, 184, 166, 0.25)',
+                                  }}
+                                >
+                                  <span style={{ fontSize: '12px', color: '#0F766E', fontWeight: 600, marginRight: '6px' }}>Source</span>
+                                  <span style={{ fontSize: '12px', color: '#0F766E', fontWeight: 500 }} className="truncate">
+                                    {item.sourceExperience}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
                           </div>
                         ))}
                       </div>
+
+                      {(personaData?.careerHighlights ?? []).length === 0 && (
+                        <p style={{ fontSize: '13px', color: '#6B7280', lineHeight: '1.5' }}>
+                          No career highlights found in the draft yet.
+                        </p>
+                      )}
                     </div>
                   </div>
                 </motion.div>
@@ -2497,10 +2615,33 @@ export default function App() {
               <div className="mb-8">
                 <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Career Highlights</h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {personaData.careerHighlights.map((highlight, idx) => (
-                    <div key={idx} className="p-3 rounded-lg border flex items-start gap-2" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
+                  {personaData.careerHighlights.map((item, idx) => (
+                    <div
+                      key={`${idx}-${item.highlight}`}
+                      className="p-3 rounded-lg border flex items-start gap-2"
+                      style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}
+                    >
                       <Award size={16} style={{ color: '#14B8A6', marginTop: '2px', flexShrink: 0 }} />
-                      <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5' }}>{highlight}</p>
+                      <div className="min-w-0">
+                        <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5', marginBottom: item.sourceExperience ? '6px' : 0 }}>
+                          {item.highlight}
+                        </p>
+
+                        {item.sourceExperience && (
+                          <div
+                            className="inline-flex items-center rounded-md px-2 py-1"
+                            style={{
+                              backgroundColor: 'rgba(20, 184, 166, 0.10)',
+                              border: '1px solid rgba(20, 184, 166, 0.25)',
+                            }}
+                          >
+                            <span style={{ fontSize: '12px', color: '#0F766E', fontWeight: 600, marginRight: '6px' }}>Source</span>
+                            <span style={{ fontSize: '12px', color: '#0F766E', fontWeight: 500 }} className="truncate">
+                              {item.sourceExperience}
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
