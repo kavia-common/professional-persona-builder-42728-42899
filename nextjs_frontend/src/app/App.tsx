@@ -1,6 +1,15 @@
-import { useState, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Upload, Loader2, X, Edit3, Plus, CheckCircle2, Camera, Award, Compass } from 'lucide-react';
+import {
+  getBuildStatus,
+  listPersonaVersions,
+  orchestrationRunAll,
+  updatePersona,
+  type BuildStatus,
+  type PersonaVersion,
+  type UUID,
+} from '../lib/apiClient';
 
 const bgImage = '/assets/24fa192a7a1db10ae3078a00cc00f09e2f26b6de.png';
 
@@ -14,6 +23,11 @@ interface Experience {
   description: string;
 }
 
+/**
+ * UI Persona shape (legacy from the integrated template).
+ * Backend persona JSON is currently represented/stored as arbitrary JSON and/or as a strict PersonaDraft.
+ * We keep this UI model but now populate it from backend draft/final JSON when available.
+ */
 interface PersonaData {
   name: string;
   title: string;
@@ -34,10 +48,55 @@ interface UploadedFileData {
   file: File;
 }
 
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((v) => typeof v === 'string' && v.trim().length > 0) as string[];
+}
+
+function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaData): PersonaData {
+  // Attempt to map the backend "PersonaDraft" into this UI's legacy PersonaData fields.
+  // If fields aren't present, we keep the existing fallback.
+  try {
+    const title = typeof personaJson?.title === 'string' ? personaJson.title : fallback.title;
+
+    const nameFromTitle =
+      typeof personaJson?.profile?.headline === 'string' ? personaJson.profile.headline : fallback.name;
+
+    const summary = typeof personaJson?.summary === 'string' ? personaJson.summary : fallback.summary;
+
+    const skills = asStringArray(personaJson?.skills);
+    const experienceHighlights = asStringArray(personaJson?.experienceHighlights);
+
+    return {
+      ...fallback,
+      name: nameFromTitle,
+      title,
+      summary,
+      skills: skills.length > 0 ? skills : fallback.skills,
+      careerHighlights: experienceHighlights.length > 0 ? experienceHighlights : fallback.careerHighlights,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 export default function App() {
   const [state, setState] = useState<AppState>('initial');
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFileData[]>([]);
   const [uploadError, setUploadError] = useState<string>('');
+
+  // Backend-driven workflow state
+  const [backendError, setBackendError] = useState<string>('');
+  const [buildId, setBuildId] = useState<UUID | null>(null);
+  const [personaId, setPersonaId] = useState<UUID | null>(null);
+  const [buildStatus, setBuildStatus] = useState<BuildStatus | null>(null);
+  const [isPolling, setIsPolling] = useState(false);
+
+  // Version history state
+  const [versions, setVersions] = useState<PersonaVersion[]>([]);
+  const [versionsError, setVersionsError] = useState<string>('');
+  const [isLoadingVersions, setIsLoadingVersions] = useState(false);
+
   const [isEditable, setIsEditable] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isHoveringHeading, setIsHoveringHeading] = useState(false);
@@ -48,46 +107,54 @@ export default function App() {
   const profileImageInputRef = useRef<HTMLInputElement>(null);
   const newSkillInputRef = useRef<HTMLInputElement>(null);
 
-  const [personaData, setPersonaData] = useState<PersonaData>({
-    name: 'Sarah Johnson',
-    title: 'Senior Product Manager',
-    summary: 'Results-driven Product Manager with 8+ years of experience leading cross-functional teams to deliver innovative SaaS solutions. Proven track record in strategic planning, user-centered design, and data-driven decision making. Passionate about transforming complex business challenges into elegant product experiences.',
-    skills: ['Product Strategy', 'Agile/Scrum', 'User Research', 'Data Analytics', 'Roadmap Planning', 'Stakeholder Management'],
-    experiences: [
-      {
-        id: '1',
-        role: 'Senior Product Manager',
-        company: 'TechCorp Solutions',
-        date: '2020 - Present',
-        description: 'Leading product development for enterprise SaaS platform serving 500K+ users. Increased user engagement by 45% through data-driven feature prioritization.'
-      },
-      {
-        id: '2',
-        role: 'Product Manager',
-        company: 'Innovation Labs',
-        date: '2017 - 2020',
-        description: 'Managed end-to-end product lifecycle for B2B marketplace. Successfully launched 3 major features that contributed to 30% revenue growth.'
-      }
-    ],
-    education: ['MBA, Stanford University', 'BS Computer Science, UC Berkeley'],
-    certifications: ['Certified Scrum Product Owner (CSPO)', 'Google Analytics Certified'],
-    tools: ['Jira', 'Figma', 'Mixpanel', 'Tableau', 'Amplitude'],
-    industries: ['SaaS', 'Enterprise Software', 'B2B Marketplace'],
-    yearsOfExperience: '8+',
-    careerHighlights: [
-      'Drove 45% increase in user engagement across enterprise platform',
-      'Led cross-functional team of 12 members to successful product launch',
-      'Achieved 30% revenue growth through strategic feature prioritization',
-      'Delivered 3 major product releases under budget and ahead of schedule'
-    ]
-  });
+  const initialPersonaFallback = useMemo<PersonaData>(
+    () => ({
+      name: 'Sarah Johnson',
+      title: 'Senior Product Manager',
+      summary:
+        'Results-driven Product Manager with 8+ years of experience leading cross-functional teams to deliver innovative SaaS solutions. Proven track record in strategic planning, user-centered design, and data-driven decision making. Passionate about transforming complex business challenges into elegant product experiences.',
+      skills: ['Product Strategy', 'Agile/Scrum', 'User Research', 'Data Analytics', 'Roadmap Planning', 'Stakeholder Management'],
+      experiences: [
+        {
+          id: '1',
+          role: 'Senior Product Manager',
+          company: 'TechCorp Solutions',
+          date: '2020 - Present',
+          description:
+            'Leading product development for enterprise SaaS platform serving 500K+ users. Increased user engagement by 45% through data-driven feature prioritization.',
+        },
+        {
+          id: '2',
+          role: 'Product Manager',
+          company: 'Innovation Labs',
+          date: '2017 - 2020',
+          description:
+            'Managed end-to-end product lifecycle for B2B marketplace. Successfully launched 3 major features that contributed to 30% revenue growth.',
+        },
+      ],
+      education: ['MBA, Stanford University', 'BS Computer Science, UC Berkeley'],
+      certifications: ['Certified Scrum Product Owner (CSPO)', 'Google Analytics Certified'],
+      tools: ['Jira', 'Figma', 'Mixpanel', 'Tableau', 'Amplitude'],
+      industries: ['SaaS', 'Enterprise Software', 'B2B Marketplace'],
+      yearsOfExperience: '8+',
+      careerHighlights: [
+        'Drove 45% increase in user engagement across enterprise platform',
+        'Led cross-functional team of 12 members to successful product launch',
+        'Achieved 30% revenue growth through strategic feature prioritization',
+        'Delivered 3 major product releases under budget and ahead of schedule',
+      ],
+    }),
+    []
+  );
+
+  const [personaData, setPersonaData] = useState<PersonaData>(initialPersonaFallback);
 
   const ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.txt'];
   const MAX_FILES = 5;
 
   const validateFile = (file: File): boolean => {
     const fileName = file.name.toLowerCase();
-    const isValid = ALLOWED_EXTENSIONS.some(ext => fileName.endsWith(ext));
+    const isValid = ALLOWED_EXTENSIONS.some((ext) => fileName.endsWith(ext));
     return isValid;
   };
 
@@ -100,7 +167,8 @@ export default function App() {
 
   const addFiles = (files: File[]) => {
     setUploadError('');
-    
+    setBackendError('');
+
     // Check if adding these files would exceed the limit
     if (uploadedFiles.length + files.length > MAX_FILES) {
       setUploadError(`Maximum ${MAX_FILES} documents allowed.`);
@@ -108,16 +176,16 @@ export default function App() {
     }
 
     // Validate all files
-    const invalidFiles = files.filter(file => !validateFile(file));
+    const invalidFiles = files.filter((file) => !validateFile(file));
     if (invalidFiles.length > 0) {
       setUploadError('Unsupported file format. Please upload PDF, DOCX, or TXT.');
       return;
     }
 
     // Add valid files
-    const newUploadedFiles = files.map(file => ({
+    const newUploadedFiles = files.map((file) => ({
       id: Math.random().toString(36).substr(2, 9),
-      file
+      file,
     }));
 
     setUploadedFiles([...uploadedFiles, ...newUploadedFiles]);
@@ -136,30 +204,192 @@ export default function App() {
   };
 
   const removeFile = (id: string) => {
-    setUploadedFiles(uploadedFiles.filter(f => f.id !== id));
+    setUploadedFiles(uploadedFiles.filter((f) => f.id !== id));
     setUploadError('');
   };
 
-  const handleGenerateDraft = () => {
-    setState('processing');
-    setTimeout(() => {
-      setState('draft');
-    }, 2000);
+  const handleGenerateDraft = async () => {
+    setBackendError('');
+    setVersionsError('');
+    setVersions([]);
+    setIsEditable(false);
+    setHasUnsavedChanges(false);
+
+    // Start backend-driven orchestration, then poll /builds/{id}/status for progress.
+    try {
+      setState('processing');
+
+      const files = uploadedFiles.map((f) => f.file);
+
+      // Use /orchestration/run-all (it will handle start + extract + draft generation).
+      // It can also auto-select latest category docs in DB mode, but for this UI we always supply files.
+      // NOTE: /uploads/documents side-effects persist + extract + normalize, but it doesn't return documentIds.
+      // run-all can proceed without explicit documentIds if the backend supports category auto-selection.
+      // For now, rely on backend's run-all flow (it can select latest category docs) while we just upload.
+      //
+      // We still need to upload to establish latest docs on the backend; orchestration can then pick them up.
+      // To keep the UI simple, we do not require user to tag categories in this step.
+      await import('../lib/apiClient').then(async ({ uploadDocuments }) => {
+        await uploadDocuments({ files });
+      });
+
+      const runAll = await orchestrationRunAll({
+        mode: 'persona_build',
+        // Leave userId null for now; backend supports null userId in scaffold.
+        useLatestCategoryDocs: true,
+        autoCreatePersona: true,
+        generate: {
+          saveDraft: true,
+          createVersion: true,
+        },
+      });
+
+      setBuildId(runAll.build.id);
+      setPersonaId(runAll.results.generate.personaId ?? null);
+      setBuildStatus({
+        id: runAll.build.id,
+        status: runAll.build.status,
+        progress: runAll.build.progress,
+        message: runAll.build.message ?? null,
+        currentStep: runAll.build.currentStep ?? null,
+        updatedAt: runAll.build.updatedAt,
+      });
+
+      // If the backend already produced persona artifacts immediately, we can enter draft state.
+      // Otherwise we keep "processing" and let polling transition us.
+      if (runAll.build.status === 'succeeded') {
+        setState('draft');
+      } else {
+        setState('processing');
+      }
+    } catch (e: any) {
+      setState('initial');
+      setBackendError(e?.message || 'Failed to generate draft persona.');
+    }
   };
 
-  const handleSaveChanges = () => {
-    setHasUnsavedChanges(false);
-    setShowSaveSuccess(true);
-    // Save changes logic here - editable mode remains active
-    setTimeout(() => {
-      setShowSaveSuccess(false);
-    }, 3000);
+  const handleSaveChanges = async () => {
+    // Persist edited persona JSON as a new version in backend (if persona exists).
+    // In scaffold mode without DB, backend may return 503; we surface the error.
+    try {
+      setBackendError('');
+      if (!personaId) {
+        // If no personaId is available, we still show local "saved" behavior.
+        setHasUnsavedChanges(false);
+        setShowSaveSuccess(true);
+        setTimeout(() => setShowSaveSuccess(false), 3000);
+        return;
+      }
+
+      await updatePersona({
+        personaId,
+        title: personaData.title,
+        // Store the whole UI persona as personaJson for now.
+        personaJson: personaData as any,
+      });
+
+      setHasUnsavedChanges(false);
+      setShowSaveSuccess(true);
+      setTimeout(() => setShowSaveSuccess(false), 3000);
+
+      // Refresh versions list after save
+      await refreshVersions(personaId);
+    } catch (e: any) {
+      setBackendError(e?.message || 'Failed to save changes to backend.');
+    }
   };
 
   const handleFinalize = () => {
     setState('finalized');
     setIsEditable(false);
   };
+
+  async function refreshVersions(id: UUID) {
+    setIsLoadingVersions(true);
+    setVersionsError('');
+    try {
+      const resp = await listPersonaVersions(id);
+      const sorted = [...resp.versions].sort((a, b) => b.version - a.version);
+      setVersions(sorted);
+    } catch (e: any) {
+      setVersionsError(e?.message || 'Failed to load version history.');
+    } finally {
+      setIsLoadingVersions(false);
+    }
+  }
+
+  // Poll build progress while processing
+  useEffect(() => {
+    if (!buildId) return;
+    if (state !== 'processing') return;
+
+    let cancelled = false;
+    setIsPolling(true);
+
+    const interval = setInterval(async () => {
+      try {
+        const status = await getBuildStatus(buildId);
+        if (cancelled) return;
+        setBuildStatus(status);
+
+        if (status.status === 'succeeded') {
+          setState('draft');
+        } else if (status.status === 'failed' || status.status === 'cancelled') {
+          setBackendError(status.message || `Build ${status.status}.`);
+          setState('initial');
+        }
+      } catch (e: any) {
+        if (cancelled) return;
+        setBackendError(e?.message || 'Failed to poll build status.');
+        setState('initial');
+      }
+    }, 800);
+
+    return () => {
+      cancelled = true;
+      setIsPolling(false);
+      clearInterval(interval);
+    };
+  }, [buildId, state]);
+
+  // When we enter draft state, attempt to fetch orchestration artifacts and populate UI persona (best-effort).
+  useEffect(() => {
+    if (!buildId) return;
+    if (state !== 'draft') return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getOrchestrationByBuild } = await import('../lib/apiClient');
+        const orch = await getOrchestrationByBuild(buildId);
+        if (cancelled) return;
+
+        // Try a few known locations; orchestration record shape is "additionalProperties: true".
+        const maybeDraft =
+          (orch as any)?.draftPersona ||
+          (orch as any)?.draft ||
+          (orch as any)?.artifacts?.draft ||
+          (orch as any)?.artifacts?.personaDraft;
+
+        if (maybeDraft) {
+          setPersonaData((prev) => coercePersonaDataFromBackendJson(maybeDraft, prev));
+        }
+      } catch {
+        // best-effort only; ignore
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [buildId, state]);
+
+  // Load versions whenever personaId becomes available.
+  useEffect(() => {
+    if (!personaId) return;
+    refreshVersions(personaId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [personaId]);
 
   const removeSkill = (skillToRemove: string) => {
     setPersonaData({
@@ -681,32 +911,34 @@ export default function App() {
                     ))}
                   </div>
 
-                  <div className="flex items-center gap-2 mb-6">
+                  <div className="flex items-center gap-2 mb-3">
                     {state === 'processing' ? (
                       <>
                         <Loader2 className="animate-spin" size={16} style={{ color: '#14B8A6' }} />
-                        <span 
+                        <span
                           className="rounded-full px-3 py-1"
-                          style={{ 
+                          style={{
                             backgroundColor: 'rgba(20, 184, 166, 0.1)',
                             color: '#14B8A6',
                             fontSize: '12px',
-                            fontWeight: 500
+                            fontWeight: 500,
                           }}
                         >
-                          Analyzing Resume...
+                          {buildStatus
+                            ? `Processing (${buildStatus.progress}%)${buildStatus.currentStep ? ` · ${buildStatus.currentStep}` : ''}`
+                            : 'Processing...'}
                         </span>
                       </>
                     ) : (
                       <>
                         <CheckCircle2 size={16} style={{ color: '#22C55E' }} />
-                        <span 
+                        <span
                           className="rounded-full px-3 py-1"
-                          style={{ 
+                          style={{
                             backgroundColor: 'rgba(34, 197, 94, 0.1)',
                             color: '#22C55E',
                             fontSize: '12px',
-                            fontWeight: 500
+                            fontWeight: 500,
                           }}
                         >
                           Processed
@@ -714,6 +946,60 @@ export default function App() {
                       </>
                     )}
                   </div>
+
+                  {/* Backend error banner (best-effort; shown where user is looking) */}
+                  {backendError && (
+                    <div
+                      className="mb-4 rounded-lg p-3"
+                      style={{
+                        backgroundColor: 'rgba(220, 38, 38, 0.08)',
+                        border: '1px solid rgba(220, 38, 38, 0.25)',
+                        color: '#DC2626',
+                        fontSize: '13px',
+                        lineHeight: '1.4',
+                      }}
+                    >
+                      {backendError}
+                    </div>
+                  )}
+
+                  {/* Version history (if persona exists / backend configured) */}
+                  {state === 'draft' && (
+                    <div className="mb-2">
+                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '10px' }}>
+                        Version History
+                      </h4>
+
+                      {isLoadingVersions ? (
+                        <div className="flex items-center gap-2" style={{ color: '#6B7280', fontSize: '13px' }}>
+                          <Loader2 className="animate-spin" size={14} />
+                          Loading versions...
+                        </div>
+                      ) : versionsError ? (
+                        <div style={{ color: '#DC2626', fontSize: '13px' }}>{versionsError}</div>
+                      ) : versions.length === 0 ? (
+                        <div style={{ color: '#6B7280', fontSize: '13px' }}>
+                          {personaId ? 'No versions found yet.' : 'No saved persona yet (versions available after save).'}
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {versions.slice(0, 5).map((v) => (
+                            <div
+                              key={v.id}
+                              className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2"
+                            >
+                              <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>
+                                v{v.version}
+                              </div>
+                              <div style={{ fontSize: '12px', color: '#6B7280' }}>
+                                {new Date(v.createdAt).toLocaleString()}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {state === 'draft' && (
                     <>
@@ -1486,9 +1772,9 @@ export default function App() {
                     <div
                       key={idx}
                       className="p-3 rounded-lg border flex items-start gap-2"
-                      style={{ 
+                      style={{
                         borderColor: '#D1D5DB',
-                        backgroundColor: '#FAFAFA'
+                        backgroundColor: '#FAFAFA',
                       }}
                     >
                       <Award size={16} style={{ color: '#14B8A6', marginTop: '2px', flexShrink: 0 }} />
@@ -1498,6 +1784,35 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+              </div>
+
+              {/* Version history (finalized) */}
+              <div>
+                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>
+                  Version History
+                </h4>
+
+                {isLoadingVersions ? (
+                  <div className="flex items-center gap-2" style={{ color: '#6B7280', fontSize: '13px' }}>
+                    <Loader2 className="animate-spin" size={14} />
+                    Loading versions...
+                  </div>
+                ) : versionsError ? (
+                  <div style={{ color: '#DC2626', fontSize: '13px' }}>{versionsError}</div>
+                ) : versions.length === 0 ? (
+                  <div style={{ color: '#6B7280', fontSize: '13px' }}>
+                    {personaId ? 'No versions found yet.' : 'No saved persona yet (versions available after save).'}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {versions.slice(0, 10).map((v) => (
+                      <div key={v.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
+                        <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>v{v.version}</div>
+                        <div style={{ fontSize: '12px', color: '#6B7280' }}>{new Date(v.createdAt).toLocaleString()}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </motion.div>
           </motion.div>
