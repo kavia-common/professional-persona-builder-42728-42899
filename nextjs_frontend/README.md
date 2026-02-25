@@ -1,4 +1,3 @@
-
   # 2-Step Career Navigator UI
 
   This is a code bundle for 2-Step Career Navigator UI. The original project is available at https://www.figma.com/design/fOfmhhDzaqnVoFiefAcX5o/2-Step-Career-Navigator-UI.
@@ -9,15 +8,10 @@
 
   Run `npm run dev` to start the development server.
 
-  ### Troubleshooting
+  ### Notes (dev ergonomics)
 
-  If `npm run dev`, `npm run build`, or `npm run preview` fails with an error like:
-
-  `Error [ERR_MODULE_NOT_FOUND]: Cannot find module .../node_modules/vite/dist/node/cli.js`
-
-  it usually means `node_modules` is in a corrupted/partial state (the `vite/dist` folder is missing).
-  Fix it by doing a clean reinstall:
-
-  - `rm -rf node_modules package-lock.json`
-  - `npm install` (or `npm ci` if you have an existing lockfile)
+  - This project runs Next.js on port **3000** (`next dev -p 3000`).
+  - If you see `EADDRINUSE: address already in use 0.0.0.0:3000`, it means some
+    other process is already listening on 3000. Stop that process or run Next on
+    a different port (e.g. `next dev -p 3002`).
   

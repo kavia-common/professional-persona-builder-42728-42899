@@ -1,3 +1,65 @@
+/*
+  Global stylesheet entrypoint.
+
+  IMPORTANT:
+  - Tailwind layer directives MUST come first.
+  - To avoid persistent Next/Tailwind build issues, do NOT import a separate CSS
+    file that contains `@layer ...` rules (like theme.css). In some setups Next
+    may end up processing that file standalone, which triggers:
+      "You used `@layer base` without `@tailwind base`"
+  - Keep all Tailwind layer usage in THIS single global entrypoint.
+*/
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Project globals */
 @import './fonts.css';
-@import './tailwind.css';
+
+/* Theme variables (no Tailwind directives). Safe to keep in a separate file. */
 @import './theme.css';
+
+/*
+  Theme base-layer styles MUST be declared here (the same file that contains
+  @tailwind base) to avoid Tailwind considering them "standalone".
+*/
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  html {
+    font-size: var(--font-size);
+  }
+}
+
+/* Optional animation utilities provided by dependency `tw-animate-css`. */
+@import 'tw-animate-css';
+
+/* Upload heading underline: avoids motion/state updates on mousemove/hover. */
+.upload-heading-underline {
+  position: relative;
+  display: inline-block;
+}
+
+.upload-heading-underline::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -4px;
+  height: 2px;
+  background: #14B8A6;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 200ms ease;
+}
+
+.upload-heading-underline:hover::after {
+  transform: scaleX(1);
+}
