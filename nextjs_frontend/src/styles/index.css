@@ -3,8 +3,11 @@
 
   IMPORTANT:
   - Tailwind layer directives MUST come first.
-  - Any file using `@layer base` (e.g. theme.css) MUST be imported only after
-    `@tailwind base` is declared, otherwise Tailwind will error during build.
+  - To avoid persistent Next/Tailwind build issues, do NOT import a separate CSS
+    file that contains `@layer ...` rules (like theme.css). In some setups Next
+    may end up processing that file standalone, which triggers:
+      "You used `@layer base` without `@tailwind base`"
+  - Keep all Tailwind layer usage in THIS single global entrypoint.
 */
 
 @tailwind base;
@@ -14,11 +17,26 @@
 /* Project globals */
 @import './fonts.css';
 
-/*
-  Theme must come after Tailwind directives because it uses Tailwind layers
-  (e.g. `@layer base`).
-*/
+/* Theme variables (no Tailwind directives). Safe to keep in a separate file. */
 @import './theme.css';
+
+/*
+  Theme base-layer styles MUST be declared here (the same file that contains
+  @tailwind base) to avoid Tailwind considering them "standalone".
+*/
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  html {
+    font-size: var(--font-size);
+  }
+}
 
 /* Optional animation utilities provided by dependency `tw-animate-css`. */
 @import 'tw-animate-css';
