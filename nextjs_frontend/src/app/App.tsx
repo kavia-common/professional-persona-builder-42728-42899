@@ -150,10 +150,11 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
    *    (and log that scenario for debugging).
    */
   const candidates: Array<Array<string>> = [
-    // Most likely canonical locations
+    // Most likely canonical locations (PRIORITY ORDER MATTERS)
+    // Per user_input_ref: backend is sending draft persona under artifacts.draftPersona.
+    ['artifacts', 'draftPersona'],
     ['artifacts', 'output', 'personaJson'],
     ['artifacts', 'finalPersona'],
-    ['artifacts', 'draftPersona'],
 
     // Legacy/alternate locations
     ['artifacts', 'personaJson'],
@@ -254,12 +255,15 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
     const nameFromHeadline =
       typeof headlineCandidate === 'string' && headlineCandidate.trim().length > 0 ? headlineCandidate : fallback.name;
 
-    // REQUIRED mappings per user instructions
-    const summaryCandidate = personaJson?.professional_summary;
+    // REQUIRED mappings per user instructions:
+    // - professional_summary -> summary
+    // - core_competencies -> skills
+    // Also accept PersonaDraft-style fields as fallback (summary/skills).
+    const summaryCandidate = personaJson?.professional_summary ?? personaJson?.summary;
     const summary =
       typeof summaryCandidate === 'string' && summaryCandidate.trim().length > 0 ? summaryCandidate : fallback.summary;
 
-    const skillsCandidate = personaJson?.core_competencies;
+    const skillsCandidate = personaJson?.core_competencies ?? personaJson?.skills;
     const skills = asStringArray(skillsCandidate);
 
     const highlightsCandidate = personaJson?.career_highlights;
@@ -828,7 +832,9 @@ export default function App() {
           const current = prev ?? initialPersonaFallback;
           const coerced = coercePersonaDataFromBackendJson(personaJson, current);
 
-          if (JSON.stringify(coerced) === JSON.stringify(current)) return prev;
+          // Deep equality guard (per user_input_ref) to prevent infinite render loops / Chrome crash.
+          // Only apply the state update if the actual JSON content changed.
+          if (JSON.stringify(coerced) === JSON.stringify(prev)) return prev;
 
           console.log(`[artifacts][gen:${generationId}] personaData updated from backend artifacts (JSON diff changed)`);
           return coerced;
