@@ -82,7 +82,23 @@ function isNonEmptyObject(value: unknown): value is Record<string, unknown> {
 }
 
 function inferDraftFromOrchestrationRecord(orch: any): any | null {
-  // Try a few known locations; orchestration record shape is "additionalProperties: true".
+  /**
+   * Best-effort extraction of persona JSON from orchestration record.
+   *
+   * Prefer FINAL persona if present (so UI mirrors backend "finalized" artifacts),
+   * otherwise fall back to DRAFT persona.
+   *
+   * OrchestrationRecord is additionalProperties=true so we must be defensive.
+   */
+  const maybeFinal =
+    orch?.finalPersona ||
+    orch?.final ||
+    orch?.artifacts?.final ||
+    orch?.artifacts?.personaFinal ||
+    orch?.results?.finalize?.final;
+
+  if (maybeFinal) return maybeFinal;
+
   const maybeDraft =
     orch?.draftPersona ||
     orch?.draft ||
@@ -202,40 +218,27 @@ export default function App() {
 
   const initialPersonaFallback = useMemo<PersonaData>(
     () => ({
-      name: 'Sarah Johnson',
-      title: 'Senior Product Manager',
-      summary:
-        'Results-driven Product Manager with 8+ years of experience leading cross-functional teams to deliver innovative SaaS solutions. Proven track record in strategic planning, user-centered design, and data-driven decision making. Passionate about transforming complex business challenges into elegant product experiences.',
-      skills: ['Product Strategy', 'Agile/Scrum', 'User Research', 'Data Analytics', 'Roadmap Planning', 'Stakeholder Management'],
-      experiences: [
-        {
-          id: '1',
-          role: 'Senior Product Manager',
-          company: 'TechCorp Solutions',
-          date: '2020 - Present',
-          description:
-            'Leading product development for enterprise SaaS platform serving 500K+ users. Increased user engagement by 45% through data-driven feature prioritization.',
-        },
-        {
-          id: '2',
-          role: 'Product Manager',
-          company: 'Innovation Labs',
-          date: '2017 - 2020',
-          description:
-            'Managed end-to-end product lifecycle for B2B marketplace. Successfully launched 3 major features that contributed to 30% revenue growth.',
-        },
-      ],
-      education: ['MBA, Stanford University', 'BS Computer Science, UC Berkeley'],
-      certifications: ['Certified Scrum Product Owner (CSPO)', 'Google Analytics Certified'],
-      tools: ['Jira', 'Figma', 'Mixpanel', 'Tableau', 'Amplitude'],
-      industries: ['SaaS', 'Enterprise Software', 'B2B Marketplace'],
-      yearsOfExperience: '8+',
-      careerHighlights: [
-        'Drove 45% increase in user engagement across enterprise platform',
-        'Led cross-functional team of 12 members to successful product launch',
-        'Achieved 30% revenue growth through strategic feature prioritization',
-        'Delivered 3 major product releases under budget and ahead of schedule',
-      ],
+      /**
+       * IMPORTANT:
+       * Previously this UI used a hardcoded demo persona ("Sarah Johnson").
+       * We now keep ONLY an empty/safe fallback so all persona/profile fields are driven by:
+       * - orchestration draft (generated) and/or
+       * - orchestration final (when finalized)
+       * - saved persona/version history (already wired via personaId + /versions)
+       *
+       * This fallback exists only to avoid undefined checks before the first successful orchestration run.
+       */
+      name: '',
+      title: '',
+      summary: '',
+      skills: [],
+      experiences: [],
+      education: [],
+      certifications: [],
+      tools: [],
+      industries: [],
+      yearsOfExperience: '',
+      careerHighlights: [],
     }),
     []
   );
@@ -715,8 +718,19 @@ export default function App() {
                 fontSize: '14px',
                 fontWeight: 600,
               }}
+              aria-label="Open profile menu"
+              title={personaData.name || personaData.title || 'Profile'}
             >
-              SJ
+              {(() => {
+                const base = (personaData.name || personaData.title || '').trim();
+                if (!base) return '•';
+                const parts = base.split(/\s+/).filter(Boolean);
+                const initials = parts
+                  .slice(0, 2)
+                  .map((p) => p[0]?.toUpperCase())
+                  .join('');
+                return initials || '•';
+              })()}
             </button>
 
             <AnimatePresence>
