@@ -58,21 +58,94 @@ function asStringArray(value: unknown): string[] {
   return value.filter((v) => typeof v === 'string' && v.trim().length > 0) as string[];
 }
 
-function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaData): PersonaData {
-  // Attempt to map the backend "PersonaDraft" into this UI's legacy PersonaData fields.
-  // If fields aren't present, we keep the existing fallback.
+function safeJsonStringify(value: unknown): string {
   try {
-    const title = typeof personaJson?.title === 'string' ? personaJson.title : fallback.title;
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
 
+function getErrorMessage(err: unknown): string {
+  if (!err) return 'Unknown error';
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+function isNonEmptyObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && Object.keys(value as any).length > 0;
+}
+
+function inferDraftFromOrchestrationRecord(orch: any): any | null {
+  // Try a few known locations; orchestration record shape is "additionalProperties: true".
+  const maybeDraft =
+    orch?.draftPersona ||
+    orch?.draft ||
+    orch?.artifacts?.draft ||
+    orch?.artifacts?.personaDraft ||
+    orch?.results?.generate?.persona ||
+    orch?.persona;
+
+  return maybeDraft ?? null;
+}
+
+function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaData): PersonaData {
+  /**
+   * Attempt to map the backend "PersonaDraft" into this UI's legacy PersonaData fields.
+   * If fields aren't present, we keep the existing fallback.
+   *
+   * IMPORTANT: This method now logs:
+   * - the raw persona JSON (sanitized via stringify)
+   * - warnings when expected fields are missing and we fall back
+   */
+  console.log('[persona][coerce] raw personaJson:', personaJson);
+
+  try {
+    const titleCandidate = personaJson?.title;
+    const title = typeof titleCandidate === 'string' && titleCandidate.trim().length > 0 ? titleCandidate : fallback.title;
+    if (title === fallback.title && titleCandidate !== undefined) {
+      console.warn('[persona][coerce] title missing/invalid; falling back to previous title. titleCandidate=', titleCandidate);
+    }
+
+    const headlineCandidate = personaJson?.profile?.headline;
     const nameFromTitle =
-      typeof personaJson?.profile?.headline === 'string' ? personaJson.profile.headline : fallback.name;
+      typeof headlineCandidate === 'string' && headlineCandidate.trim().length > 0 ? headlineCandidate : fallback.name;
+    if (nameFromTitle === fallback.name && headlineCandidate !== undefined) {
+      console.warn(
+        '[persona][coerce] profile.headline missing/invalid; falling back to previous name. headlineCandidate=',
+        headlineCandidate
+      );
+    }
 
-    const summary = typeof personaJson?.summary === 'string' ? personaJson.summary : fallback.summary;
+    const summaryCandidate = personaJson?.summary;
+    const summary =
+      typeof summaryCandidate === 'string' && summaryCandidate.trim().length > 0 ? summaryCandidate : fallback.summary;
+    if (summary === fallback.summary && summaryCandidate !== undefined) {
+      console.warn(
+        '[persona][coerce] summary missing/invalid; falling back to previous summary. summaryCandidate=',
+        summaryCandidate
+      );
+    }
 
     const skills = asStringArray(personaJson?.skills);
-    const experienceHighlights = asStringArray(personaJson?.experienceHighlights);
+    if (skills.length === 0 && personaJson?.skills !== undefined) {
+      console.warn('[persona][coerce] skills missing/invalid/empty; falling back to previous skills. skillsCandidate=', personaJson?.skills);
+    }
 
-    return {
+    const experienceHighlights = asStringArray(personaJson?.experienceHighlights);
+    if (experienceHighlights.length === 0 && personaJson?.experienceHighlights !== undefined) {
+      console.warn(
+        '[persona][coerce] experienceHighlights missing/invalid/empty; falling back to previous careerHighlights. candidate=',
+        personaJson?.experienceHighlights
+      );
+    }
+
+    const result: PersonaData = {
       ...fallback,
       name: nameFromTitle,
       title,
@@ -80,7 +153,11 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
       skills: skills.length > 0 ? skills : fallback.skills,
       careerHighlights: experienceHighlights.length > 0 ? experienceHighlights : fallback.careerHighlights,
     };
-  } catch {
+
+    console.log('[persona][coerce] result PersonaData:', result);
+    return result;
+  } catch (err) {
+    console.warn('[persona][coerce] coercion threw; returning fallback. err=', err);
     return fallback;
   }
 }
@@ -111,6 +188,9 @@ export default function App() {
   const additionalFileInputRef = useRef<HTMLInputElement>(null);
   const profileImageInputRef = useRef<HTMLInputElement>(null);
   const newSkillInputRef = useRef<HTMLInputElement>(null);
+
+  // Helps correlate logs across multiple async flows; increments per draft generation.
+  const generationIdRef = useRef<number>(0);
 
   // NOTE: Do not use click-guard refs or setTimeout-based release logic here.
   // Those patterns can accidentally create recursive click loops and freeze the browser.
@@ -232,6 +312,15 @@ export default function App() {
   };
 
   const handleGenerateDraft = async () => {
+    const generationId = ++generationIdRef.current;
+    console.log(`[draft][gen:${generationId}] handleGenerateDraft start`, {
+      state,
+      uploadedFilesCount: uploadedFiles.length,
+      uploadedFilenames: uploadedFiles.map((f) => f.file.name),
+      existingBuildId: buildId,
+      existingPersonaId: personaId,
+    });
+
     setBackendError('');
     setVersionsError('');
     setVersions([]);
@@ -244,16 +333,24 @@ export default function App() {
 
       const files = uploadedFiles.map((f) => f.file);
 
-      // Use /orchestration/run-all (it will handle start + extract + draft generation).
-      // It can also auto-select latest category docs in DB mode, but for this UI we always supply files.
-      // NOTE: /uploads/documents side-effects persist + extract + normalize, but it doesn't return documentIds.
-      // run-all can proceed without explicit documentIds if the backend supports category auto-selection.
-      // For now, rely on backend's run-all flow (it can select latest category docs) while we just upload.
-      //
+      console.log(`[draft][gen:${generationId}] uploading documents`, {
+        fileCount: files.length,
+        names: files.map((f) => f.name),
+        sizes: files.map((f) => f.size),
+        types: files.map((f) => f.type),
+      });
+
       // We still need to upload to establish latest docs on the backend; orchestration can then pick them up.
-      // To keep the UI simple, we do not require user to tag categories in this step.
       await import('../lib/apiClient').then(async ({ uploadDocuments }) => {
-        await uploadDocuments({ files });
+        const uploadResp = await uploadDocuments({ files });
+        console.log(`[draft][gen:${generationId}] uploadDocuments raw response:`, uploadResp);
+      });
+
+      console.log(`[draft][gen:${generationId}] calling orchestrationRunAll request:`, {
+        mode: 'persona_build',
+        useLatestCategoryDocs: true,
+        autoCreatePersona: true,
+        generate: { saveDraft: true, createVersion: true },
       });
 
       const runAll = await orchestrationRunAll({
@@ -266,6 +363,8 @@ export default function App() {
           createVersion: true,
         },
       });
+
+      console.log(`[draft][gen:${generationId}] orchestrationRunAll raw response:`, runAll);
 
       setBuildId(runAll.build.id);
       setPersonaId(runAll.results.generate.personaId ?? null);
@@ -281,11 +380,18 @@ export default function App() {
       // If the backend already produced persona artifacts immediately, we can enter draft state.
       // Otherwise we keep "processing" and let polling transition us.
       if (runAll.build.status === 'succeeded') {
+        console.log(`[draft][gen:${generationId}] build already succeeded; entering draft state`);
         setState('draft');
       } else {
+        console.log(`[draft][gen:${generationId}] build not yet succeeded; remain processing`, {
+          status: runAll.build.status,
+          progress: runAll.build.progress,
+          currentStep: runAll.build.currentStep,
+        });
         setState('processing');
       }
     } catch (e: any) {
+      console.error(`[draft][gen:${generationId}] generate draft failed`, e);
       setState('initial');
       setBackendError(e?.message || 'Failed to generate draft persona.');
     }
@@ -332,9 +438,11 @@ export default function App() {
     setVersionsError('');
     try {
       const resp = await listPersonaVersions(id);
+      console.log('[versions] listPersonaVersions raw response:', resp);
       const sorted = [...resp.versions].sort((a, b) => b.version - a.version);
       setVersions(sorted);
     } catch (e: any) {
+      console.error('[versions] listPersonaVersions failed:', e);
       setVersionsError(e?.message || 'Failed to load version history.');
     } finally {
       setIsLoadingVersions(false);
@@ -346,23 +454,39 @@ export default function App() {
     if (!buildId) return;
     if (state !== 'processing') return;
 
+    const generationId = generationIdRef.current;
     let cancelled = false;
     setIsPolling(true);
+
+    console.log(`[poll][gen:${generationId}] starting polling`, { buildId, state });
 
     const interval = setInterval(async () => {
       try {
         const status = await getBuildStatus(buildId);
+        console.log(`[poll][gen:${generationId}] getBuildStatus raw response:`, status);
+
         if (cancelled) return;
         setBuildStatus(status);
 
         if (status.status === 'succeeded') {
+          console.log(`[poll][gen:${generationId}] build succeeded; transitioning state -> draft`, status);
           setState('draft');
         } else if (status.status === 'failed' || status.status === 'cancelled') {
+          // IMPORTANT: do not fail silently; log message
+          console.error(
+            `[poll][gen:${generationId}] build ${status.status}; message=`,
+            status.message,
+            'full status=',
+            status
+          );
           setBackendError(status.message || `Build ${status.status}.`);
           setState('initial');
+        } else {
+          // queued/running: stay in processing
         }
       } catch (e: any) {
         if (cancelled) return;
+        console.error(`[poll][gen:${generationId}] polling error`, e);
         setBackendError(e?.message || 'Failed to poll build status.');
         setState('initial');
       }
@@ -372,6 +496,7 @@ export default function App() {
       cancelled = true;
       setIsPolling(false);
       clearInterval(interval);
+      console.log(`[poll][gen:${generationId}] stopped polling (cleanup)`, { buildId });
     };
   }, [buildId, state]);
 
@@ -380,30 +505,75 @@ export default function App() {
     if (!buildId) return;
     if (state !== 'draft') return;
 
+    const generationId = generationIdRef.current;
     let cancelled = false;
+
+    console.log(`[artifacts][gen:${generationId}] entering draft; fetching orchestration artifacts`, { buildId });
+
     (async () => {
       try {
         const { getOrchestrationByBuild } = await import('../lib/apiClient');
         const orch = await getOrchestrationByBuild(buildId);
+
+        console.log(`[artifacts][gen:${generationId}] getOrchestrationByBuild raw response:`, orch);
+
         if (cancelled) return;
 
-        // Try a few known locations; orchestration record shape is "additionalProperties: true".
-        const maybeDraft =
-          (orch as any)?.draftPersona ||
-          (orch as any)?.draft ||
-          (orch as any)?.artifacts?.draft ||
-          (orch as any)?.artifacts?.personaDraft;
+        const maybeDraft = inferDraftFromOrchestrationRecord(orch);
 
-        if (maybeDraft) {
-          setPersonaData((prev) => coercePersonaDataFromBackendJson(maybeDraft, prev));
+        if (!maybeDraft) {
+          console.warn(
+            `[artifacts][gen:${generationId}] no draft persona found in orchestration record; UI will keep fallback personaData. orch keys=`,
+            isNonEmptyObject(orch) ? Object.keys(orch) : typeof orch,
+            'orch=',
+            orch
+          );
+          return;
         }
-      } catch {
-        // best-effort only; ignore
+
+        // Guard: ensure we have a plausible object to coerce. (PersonaDraft should be object)
+        if (!isNonEmptyObject(maybeDraft)) {
+          console.warn(
+            `[artifacts][gen:${generationId}] draft persona found but is empty/non-object; ignoring to prevent flicker/reversion`,
+            { maybeDraftType: typeof maybeDraft, maybeDraft }
+          );
+          return;
+        }
+
+        console.log(`[artifacts][gen:${generationId}] draft persona extracted (pre-coerce):`, maybeDraft);
+
+        setPersonaData((prev) => {
+          const coerced = coercePersonaDataFromBackendJson(maybeDraft, prev);
+
+          // Extra guard: if coercion returns same object reference or appears unchanged, log it.
+          if (coerced === prev) {
+            console.warn(`[artifacts][gen:${generationId}] coercion returned same reference as prev (unexpected)`);
+          } else {
+            const prevSummary = prev?.summary;
+            const nextSummary = coerced?.summary;
+            if (prevSummary === nextSummary) {
+              console.warn(
+                `[artifacts][gen:${generationId}] coercion did not change summary; possible fallback usage. prevSummaryLen=`,
+                prevSummary?.length,
+                'nextSummaryLen=',
+                nextSummary?.length
+              );
+            }
+          }
+
+          return coerced;
+        });
+      } catch (err) {
+        // best-effort only; ignore, but log for diagnostics
+        console.error(`[artifacts][gen:${generationId}] artifact fetch failed`, err);
+        console.error(`[artifacts][gen:${generationId}] artifact fetch failed message:`, getErrorMessage(err));
+        console.error(`[artifacts][gen:${generationId}] artifact fetch failed details:`, safeJsonStringify(err));
       }
     })();
 
     return () => {
       cancelled = true;
+      console.log(`[artifacts][gen:${generationId}] cleanup (cancelled)`, { buildId });
     };
   }, [buildId, state]);
 
@@ -417,7 +587,7 @@ export default function App() {
   const removeSkill = (skillToRemove: string) => {
     setPersonaData({
       ...personaData,
-      skills: personaData.skills.filter(s => s !== skillToRemove)
+      skills: personaData.skills.filter((s) => s !== skillToRemove),
     });
     setHasUnsavedChanges(true);
   };
@@ -426,7 +596,7 @@ export default function App() {
     if (skill.trim()) {
       setPersonaData({
         ...personaData,
-        skills: [...personaData.skills, skill.trim()]
+        skills: [...personaData.skills, skill.trim()],
       });
       setHasUnsavedChanges(true);
     }
@@ -457,6 +627,7 @@ export default function App() {
   };
 
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isHoveringHeading, setIsHoveringHeading] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -470,7 +641,7 @@ export default function App() {
   const removeExperience = (id: string) => {
     setPersonaData({
       ...personaData,
-      experiences: personaData.experiences.filter(exp => exp.id !== id)
+      experiences: personaData.experiences.filter((exp) => exp.id !== id),
     });
     setHasUnsavedChanges(true);
   };
@@ -496,144 +667,130 @@ export default function App() {
       {/* Header */}
       <header className="bg-white border-b" style={{ borderColor: '#D1D5DB' }}>
         <div style={{ padding: '16px 32px' }} className="flex items-center justify-between">
-  
-  {/* LEFT - Logo */}
-  <div className="flex items-center gap-3">
-    <div 
-      className="w-9 h-9 rounded-lg flex items-center justify-center"
-      style={{ 
-        backgroundColor: '#14B8A6',
-        boxShadow: '0 2px 4px rgba(20, 184, 166, 0.15)'
-      }}
-    >
-      <Compass size={20} style={{ color: 'white' }} />
-    </div>
-    <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', margin: 0 }}>
-      Career Navigator
-    </h1>
-  </div>
+          {/* LEFT - Logo */}
+          <div className="flex items-center gap-3">
+            <div
+              className="w-9 h-9 rounded-lg flex items-center justify-center"
+              style={{
+                backgroundColor: '#14B8A6',
+                boxShadow: '0 2px 4px rgba(20, 184, 166, 0.15)',
+              }}
+            >
+              <Compass size={20} style={{ color: 'white' }} />
+            </div>
+            <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', margin: 0 }}>Career Navigator</h1>
+          </div>
 
-  {/* RIGHT - Profile Circle */}
-  <div className="relative">
-    <button
-      onClick={() => setIsProfileOpen(!isProfileOpen)}
-      className="w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200"
-      style={{
-        backgroundColor: '#14B8A6',
-        color: 'white',
-        fontSize: '14px',
-        fontWeight: 600
-      }}
-    >
-      SJ
-    </button>
+          {/* RIGHT - Profile Circle */}
+          <div className="relative">
+            <button
+              onClick={() => setIsProfileOpen(!isProfileOpen)}
+              className="w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200"
+              style={{
+                backgroundColor: '#14B8A6',
+                color: 'white',
+                fontSize: '14px',
+                fontWeight: 600,
+              }}
+            >
+              SJ
+            </button>
 
-    <AnimatePresence>
-      {isProfileOpen && (
-        <motion.div
-          initial={{ opacity: 0, y: -10 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -10 }}
-          transition={{ duration: 0.2 }}
-          className="absolute right-0 mt-2 w-40 bg-white rounded-lg"
-          style={{
-            border: '1px solid #D1D5DB',
-            boxShadow: '0 8px 20px rgba(0, 0, 0, 0.08)'
-          }}
-        >
-          <button className="w-full text-left px-4 py-2 hover:bg-gray-50">
-            Profile Settings
-          </button>
-          <button className="w-full text-left px-4 py-2 hover:bg-gray-50 text-red-600">
-            Logout
-          </button>
-        </motion.div>
-      )}
-    </AnimatePresence>
-  </div>
-
-</div>
+            <AnimatePresence>
+              {isProfileOpen && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  transition={{ duration: 0.2 }}
+                  className="absolute right-0 mt-2 w-40 bg-white rounded-lg"
+                  style={{
+                    border: '1px solid #D1D5DB',
+                    boxShadow: '0 8px 20px rgba(0, 0, 0, 0.08)',
+                  }}
+                >
+                  <button className="w-full text-left px-4 py-2 hover:bg-gray-50">Profile Settings</button>
+                  <button className="w-full text-left px-4 py-2 hover:bg-gray-50 text-red-600">Logout</button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </div>
       </header>
 
       {/* Step Progress */}
       <div className="bg-white" style={{ padding: '24px 32px', borderBottom: '1px solid #D1D5DB' }}>
         <div className="flex items-center justify-center gap-4 max-w-3xl mx-auto">
           <div className="flex items-center gap-3">
-            <div 
+            <div
               className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300"
               style={{
-                backgroundColor: step1Complete ? '#14B8A6' : (currentStep === 1 ? '#14B8A6' : 'transparent'),
+                backgroundColor: step1Complete ? '#14B8A6' : currentStep === 1 ? '#14B8A6' : 'transparent',
                 border: step1Complete || currentStep === 1 ? 'none' : '2px solid #D1D5DB',
                 color: step1Complete || currentStep === 1 ? 'white' : '#D1D5DB',
                 fontSize: '16px',
-                fontWeight: 600
+                fontWeight: 600,
               }}
             >
               1
             </div>
-            <span 
-              style={{ 
-                fontSize: '14px', 
+            <span
+              style={{
+                fontSize: '14px',
                 fontWeight: 500,
-                color: step1Complete || currentStep === 1 ? '#1F2937' : '#6B7280'
+                color: step1Complete || currentStep === 1 ? '#1F2937' : '#6B7280',
               }}
             >
               Ingestion Hub
             </span>
           </div>
-          
-          <div 
-            className="h-0.5 w-12 transition-colors duration-300"
-            style={{ backgroundColor: step1Complete ? '#14B8A6' : '#D1D5DB' }}
-          />
+
+          <div className="h-0.5 w-12 transition-colors duration-300" style={{ backgroundColor: step1Complete ? '#14B8A6' : '#D1D5DB' }} />
 
           <div className="flex items-center gap-3">
-            <div 
+            <div
               className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300"
               style={{
-                backgroundColor: step2Complete ? '#14B8A6' : (currentStep === 2 ? '#14B8A6' : 'transparent'),
+                backgroundColor: step2Complete ? '#14B8A6' : currentStep === 2 ? '#14B8A6' : 'transparent',
                 border: step2Complete || currentStep === 2 ? 'none' : '2px solid #D1D5DB',
                 color: step2Complete || currentStep === 2 ? 'white' : '#D1D5DB',
                 fontSize: '16px',
-                fontWeight: 600
+                fontWeight: 600,
               }}
             >
               2
             </div>
-            <span 
-              style={{ 
-                fontSize: '14px', 
+            <span
+              style={{
+                fontSize: '14px',
                 fontWeight: 500,
-                color: step2Complete || currentStep === 2 ? '#1F2937' : '#6B7280'
+                color: step2Complete || currentStep === 2 ? '#1F2937' : '#6B7280',
               }}
             >
               Persona Validation
             </span>
           </div>
 
-          <div 
-            className="h-0.5 w-12 transition-colors duration-300"
-            style={{ backgroundColor: step2Complete ? '#14B8A6' : '#D1D5DB' }}
-          />
+          <div className="h-0.5 w-12 transition-colors duration-300" style={{ backgroundColor: step2Complete ? '#14B8A6' : '#D1D5DB' }} />
 
           <div className="flex items-center gap-3">
-            <div 
+            <div
               className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300"
               style={{
-                backgroundColor: step3Complete ? '#14B8A6' : (currentStep === 3 ? '#14B8A6' : 'transparent'),
+                backgroundColor: step3Complete ? '#14B8A6' : currentStep === 3 ? '#14B8A6' : 'transparent',
                 border: step3Complete || currentStep === 3 ? 'none' : '2px solid #D1D5DB',
                 color: step3Complete || currentStep === 3 ? 'white' : '#D1D5DB',
                 fontSize: '16px',
-                fontWeight: 600
+                fontWeight: 600,
               }}
             >
               3
             </div>
-            <span 
-              style={{ 
-                fontSize: '14px', 
+            <span
+              style={{
+                fontSize: '14px',
                 fontWeight: 500,
-                color: step3Complete || currentStep === 3 ? '#1F2937' : '#6B7280'
+                color: step3Complete || currentStep === 3 ? '#1F2937' : '#6B7280',
               }}
             >
               Finalized Persona
@@ -646,12 +803,7 @@ export default function App() {
       <main style={{ padding: state === 'finalized' ? '48px 32px' : '48px 32px' }}>
         {/* Initial State */}
         {state === 'initial' && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3 }}
-            className="max-w-2xl mx-auto text-center"
-          >
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="max-w-2xl mx-auto text-center">
             <motion.h2
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -667,19 +819,10 @@ export default function App() {
             >
               <span className="upload-heading-underline">View Current State Persona</span>
             </motion.h2>
-            <p style={{ fontSize: '16px', color: '#6B7280', marginBottom: '32px' }}>
-              Upload your Professional Documents to generate your AI-powered Persona
-            </p>
+            <p style={{ fontSize: '16px', color: '#6B7280', marginBottom: '32px' }}>Upload your Professional Documents to generate your AI-powered Persona</p>
 
             {/* Keep the file input OUTSIDE the clickable dropzone to avoid self-trigger loops */}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf,.docx,.txt"
-              multiple
-              onChange={handleFileChange}
-              className="hidden"
-            />
+            <input ref={fileInputRef} type="file" accept=".pdf,.docx,.txt" multiple onChange={handleFileChange} className="hidden" />
 
             <div
               className="bg-white rounded-xl p-8 transition-all duration-300 group"
@@ -714,9 +857,7 @@ export default function App() {
                 <p style={{ fontSize: '16px', fontWeight: 500, color: '#1F2937', marginBottom: '8px' }}>
                   {uploadedFiles.length > 0 ? `${uploadedFiles.length} file(s) uploaded` : 'Upload your Documents '}
                 </p>
-                <p style={{ fontSize: '14px', color: '#6B7280' }}>
-                  Resume, Job Description, Performance Review, Certifications
-                </p>
+                <p style={{ fontSize: '14px', color: '#6B7280' }}>Resume, Job Description, Performance Review, Certifications</p>
                 <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '12px' }}>
                   Supported formats: PDF, DOCX, TXT (Max {MAX_FILES} files)
                 </p>
@@ -764,12 +905,7 @@ export default function App() {
               )}
 
               {uploadedFiles.length > 0 && (
-                <motion.div
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.3 }}
-                  className="mt-6 space-y-2"
-                >
+                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="mt-6 space-y-2">
                   {uploadedFiles.map((fileData) => (
                     <div
                       key={fileData.id}
@@ -789,9 +925,7 @@ export default function App() {
                         >
                           {getFileType(fileData.file.name)}
                         </span>
-                        <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>
-                          {fileData.file.name}
-                        </span>
+                        <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>{fileData.file.name}</span>
                       </div>
                       <button
                         onClick={(e) => {
@@ -821,7 +955,7 @@ export default function App() {
                 fontSize: '14px',
                 fontWeight: 500,
                 border: 'none',
-                cursor: uploadedFiles.length > 0 ? 'pointer' : 'not-allowed'
+                cursor: uploadedFiles.length > 0 ? 'pointer' : 'not-allowed',
               }}
               onMouseEnter={(e) => {
                 if (uploadedFiles.length > 0) {
@@ -848,21 +982,21 @@ export default function App() {
             className="max-w-7xl mx-auto"
             style={{ paddingBottom: isEditable && state === 'draft' ? '100px' : '0' }}
           >
-            <motion.h2 
+            <motion.h2
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.3 }}
               onMouseEnter={() => setIsHoveringHeading(true)}
               onMouseLeave={() => setIsHoveringHeading(false)}
               className="relative inline-block cursor-default mx-auto"
-              style={{ 
-                fontSize: state === 'draft' ? '36px' : '32px', 
-                fontWeight: 700, 
-                color: state === 'draft' ? '#14B8A6' : '#1F2937', 
+              style={{
+                fontSize: state === 'draft' ? '36px' : '32px',
+                fontWeight: 700,
+                color: state === 'draft' ? '#14B8A6' : '#1F2937',
                 marginBottom: '32px',
                 display: 'block',
                 textAlign: 'center',
-                transition: 'all 0.3s ease'
+                transition: 'all 0.3s ease',
               }}
             >
               {state === 'processing' ? 'View Current State Persona' : 'Draft Persona'}
@@ -880,7 +1014,7 @@ export default function App() {
                     height: '2px',
                     backgroundColor: '#14B8A6',
                     boxShadow: '0 0 8px rgba(20, 184, 166, 0.4)',
-                    transformOrigin: 'left'
+                    transformOrigin: 'left',
                   }}
                 />
               )}
@@ -888,34 +1022,29 @@ export default function App() {
 
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
               {/* Left Column - Upload Status */}
-              <motion.div
-                initial={{ x: state === 'draft' ? 0 : -20, opacity: 0 }}
-                animate={{ x: 0, opacity: 1 }}
-                transition={{ duration: 0.3, delay: 0.1, ease: 'easeInOut' }}
-                className="lg:col-span-2"
-              >
+              <motion.div initial={{ x: state === 'draft' ? 0 : -20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} transition={{ duration: 0.3, delay: 0.1, ease: 'easeInOut' }} className="lg:col-span-2">
                 {state === 'draft' && (
-  <button
-    onClick={() => setState('initial')}
-    className="mb-4 flex items-center gap-2 transition-all duration-200 hover:opacity-80"
-    style={{
-      color: '#14B8A6',
-      fontWeight: 500,
-      fontSize: '14px',
-      background: 'none',
-      border: 'none',
-      cursor: 'pointer'
-    }}
-  >
-    ← Go Back
-  </button>
-)}
-                <div 
+                  <button
+                    onClick={() => setState('initial')}
+                    className="mb-4 flex items-center gap-2 transition-all duration-200 hover:opacity-80"
+                    style={{
+                      color: '#14B8A6',
+                      fontWeight: 500,
+                      fontSize: '14px',
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    ← Go Back
+                  </button>
+                )}
+                <div
                   className="bg-white rounded-xl transition-all duration-300"
-                  style={{ 
+                  style={{
                     boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.05)',
                     padding: '24px',
-                    border: '1px solid rgba(20, 184, 166, 0.3)'
+                    border: '1px solid rgba(20, 184, 166, 0.3)',
                   }}
                   onMouseEnter={(e) => {
                     e.currentTarget.style.border = '1px solid #14B8A6';
@@ -926,36 +1055,19 @@ export default function App() {
                     e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
                   }}
                 >
-                  <h3 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '16px' }}>
-                    Uploaded Documents
-                  </h3>
-                  
+                  <h3 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '16px' }}>Uploaded Documents</h3>
+
                   <div className="space-y-3 mb-6">
                     {uploadedFiles.map((fileData) => (
-                      <div
-                        key={fileData.id}
-                        className="flex items-center justify-between p-3 rounded-lg bg-gray-50"
-                      >
+                      <div key={fileData.id} className="flex items-center justify-between p-3 rounded-lg bg-gray-50">
                         <div className="flex items-center gap-3">
-                          <span 
-                            className="px-2 py-1 rounded text-xs font-medium"
-                            style={{ 
-                              backgroundColor: 'rgba(20, 184, 166, 0.1)',
-                              color: '#14B8A6'
-                            }}
-                          >
+                          <span className="px-2 py-1 rounded text-xs font-medium" style={{ backgroundColor: 'rgba(20, 184, 166, 0.1)', color: '#14B8A6' }}>
                             {getFileType(fileData.file.name)}
                           </span>
-                          <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>
-                            {fileData.file.name}
-                          </span>
+                          <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>{fileData.file.name}</span>
                         </div>
                         {state === 'draft' && (
-                          <button
-                            onClick={() => removeFile(fileData.id)}
-                            className="p-1 rounded hover:bg-gray-200 transition-colors"
-                            style={{ color: '#6B7280' }}
-                          >
+                          <button onClick={() => removeFile(fileData.id)} className="p-1 rounded hover:bg-gray-200 transition-colors" style={{ color: '#6B7280' }}>
                             <X size={16} />
                           </button>
                         )}
@@ -976,9 +1088,7 @@ export default function App() {
                             fontWeight: 500,
                           }}
                         >
-                          {buildStatus
-                            ? `Processing (${buildStatus.progress}%)${buildStatus.currentStep ? ` · ${buildStatus.currentStep}` : ''}`
-                            : 'Processing...'}
+                          {buildStatus ? `Processing (${buildStatus.progress}%)${buildStatus.currentStep ? ` · ${buildStatus.currentStep}` : ''}` : 'Processing...'}
                         </span>
                       </>
                     ) : (
@@ -1018,9 +1128,7 @@ export default function App() {
                   {/* Version history (if persona exists / backend configured) */}
                   {state === 'draft' && (
                     <div className="mb-2">
-                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '10px' }}>
-                        Version History
-                      </h4>
+                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '10px' }}>Version History</h4>
 
                       {isLoadingVersions ? (
                         <div className="flex items-center gap-2" style={{ color: '#6B7280', fontSize: '13px' }}>
@@ -1030,22 +1138,13 @@ export default function App() {
                       ) : versionsError ? (
                         <div style={{ color: '#DC2626', fontSize: '13px' }}>{versionsError}</div>
                       ) : versions.length === 0 ? (
-                        <div style={{ color: '#6B7280', fontSize: '13px' }}>
-                          {personaId ? 'No versions found yet.' : 'No saved persona yet (versions available after save).'}
-                        </div>
+                        <div style={{ color: '#6B7280', fontSize: '13px' }}>{personaId ? 'No versions found yet.' : 'No saved persona yet (versions available after save).'}</div>
                       ) : (
                         <div className="space-y-2">
                           {versions.slice(0, 5).map((v) => (
-                            <div
-                              key={v.id}
-                              className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2"
-                            >
-                              <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>
-                                v{v.version}
-                              </div>
-                              <div style={{ fontSize: '12px', color: '#6B7280' }}>
-                                {new Date(v.createdAt).toLocaleString()}
-                              </div>
+                            <div key={v.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
+                              <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>v{v.version}</div>
+                              <div style={{ fontSize: '12px', color: '#6B7280' }}>{new Date(v.createdAt).toLocaleString()}</div>
                             </div>
                           ))}
                         </div>
@@ -1055,20 +1154,11 @@ export default function App() {
 
                   {state === 'draft' && (
                     <>
-                      <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '16px' }}>
-                        Draft persona generated successfully.
-                      </p>
-                      
+                      <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '16px' }}>Draft persona generated successfully.</p>
+
                       {uploadedFiles.length < MAX_FILES && (
                         <>
-                          <input
-                            ref={additionalFileInputRef}
-                            type="file"
-                            accept=".pdf,.docx,.txt"
-                            multiple
-                            onChange={handleFileChange}
-                            className="hidden"
-                          />
+                          <input ref={additionalFileInputRef} type="file" accept=".pdf,.docx,.txt" multiple onChange={handleFileChange} className="hidden" />
                           <button
                             onClick={() => additionalFileInputRef.current?.click()}
                             className="w-full flex items-center justify-center gap-2 rounded-lg border-2 border-dashed p-3 transition-colors hover:bg-gray-50"
@@ -1076,7 +1166,7 @@ export default function App() {
                               borderColor: '#D1D5DB',
                               color: '#6B7280',
                               fontSize: '14px',
-                              fontWeight: 500
+                              fontWeight: 500,
                             }}
                           >
                             <Plus size={16} />
@@ -1091,18 +1181,13 @@ export default function App() {
 
               {/* Right Column - Draft Persona */}
               {state === 'draft' && (
-                <motion.div
-                  initial={{ x: 20, opacity: 0 }}
-                  animate={{ x: 0, opacity: 1 }}
-                  transition={{ duration: 0.3, delay: 0.2 }}
-                  className="lg:col-span-3"
-                >
-                  <div 
+                <motion.div initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} transition={{ duration: 0.3, delay: 0.2 }} className="lg:col-span-3">
+                  <div
                     className="bg-white rounded-xl transition-all duration-300"
-                    style={{ 
+                    style={{
                       boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.05)',
                       padding: '24px',
-                      border: '1px solid rgba(20, 184, 166, 0.3)'
+                      border: '1px solid rgba(20, 184, 166, 0.3)',
                     }}
                     onMouseEnter={(e) => {
                       e.currentTarget.style.border = '1px solid #14B8A6';
@@ -1114,12 +1199,12 @@ export default function App() {
                     }}
                   >
                     <div className="flex items-center justify-between mb-6">
-                      <h3 
-                        style={{ 
-                          fontSize: '20px', 
-                          fontWeight: 700, 
+                      <h3
+                        style={{
+                          fontSize: '20px',
+                          fontWeight: 700,
                           color: '#14B8A6',
-                          transition: 'filter 0.3s ease'
+                          transition: 'filter 0.3s ease',
                         }}
                         onMouseEnter={(e) => {
                           e.currentTarget.style.filter = 'drop-shadow(0 0 8px rgba(20, 184, 166, 0.4))';
@@ -1141,7 +1226,7 @@ export default function App() {
                               color: 'white',
                               border: 'none',
                               fontSize: '14px',
-                              fontWeight: 500
+                              fontWeight: 500,
                             }}
                             onMouseEnter={(e) => {
                               e.currentTarget.style.backgroundColor = '#0FB9B1';
@@ -1164,7 +1249,7 @@ export default function App() {
                               style={{
                                 fontSize: '14px',
                                 color: '#22C55E',
-                                fontWeight: 500
+                                fontWeight: 500,
                               }}
                             >
                               <CheckCircle2 size={16} />
@@ -1181,7 +1266,7 @@ export default function App() {
                             color: '#14B8A6',
                             border: '1px solid #14B8A6',
                             fontSize: '14px',
-                            fontWeight: 500
+                            fontWeight: 500,
                           }}
                         >
                           <Edit3 size={16} />
@@ -1193,25 +1278,12 @@ export default function App() {
                     {/* Persona Header */}
                     <div className="flex items-center gap-4 mb-6 pb-6" style={{ borderBottom: '1px solid #D1D5DB' }}>
                       <div className="relative group">
-                        <input
-                          ref={profileImageInputRef}
-                          type="file"
-                          accept="image/*"
-                          onChange={handleProfileImageChange}
-                          className="hidden"
-                        />
+                        <input ref={profileImageInputRef} type="file" accept="image/*" onChange={handleProfileImageChange} className="hidden" />
                         {personaData.profileImage ? (
-                          <img
-                            src={personaData.profileImage}
-                            alt="Profile"
-                            className="w-16 h-16 rounded-full object-cover flex-shrink-0"
-                          />
+                          <img src={personaData.profileImage} alt="Profile" className="w-16 h-16 rounded-full object-cover flex-shrink-0" />
                         ) : (
-                          <div 
-                            className="w-16 h-16 rounded-full flex items-center justify-center flex-shrink-0"
-                            style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '24px', fontWeight: 600 }}
-                          >
-                            {personaData.name.split(' ').map(n => n[0]).join('')}
+                          <div className="w-16 h-16 rounded-full flex items-center justify-center flex-shrink-0" style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '24px', fontWeight: 600 }}>
+                            {personaData.name.split(' ').map((n) => n[0]).join('')}
                           </div>
                         )}
                         {isEditable && (
@@ -1219,7 +1291,7 @@ export default function App() {
                             onClick={() => profileImageInputRef.current?.click()}
                             className="absolute inset-0 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                             style={{
-                              backgroundColor: 'rgba(0, 0, 0, 0.5)'
+                              backgroundColor: 'rgba(0, 0, 0, 0.5)',
                             }}
                           >
                             <Camera size={20} style={{ color: 'white' }} />
@@ -1242,7 +1314,7 @@ export default function App() {
                                 borderColor: '#D1D5DB',
                                 fontSize: '20px',
                                 fontWeight: 600,
-                                color: '#1F2937'
+                                color: '#1F2937',
                               }}
                             />
                             <input
@@ -1257,18 +1329,14 @@ export default function App() {
                                 padding: '8px 12px',
                                 borderColor: '#D1D5DB',
                                 fontSize: '14px',
-                                color: '#6B7280'
+                                color: '#6B7280',
                               }}
                             />
                           </>
                         ) : (
                           <>
-                            <h4 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', marginBottom: '4px' }}>
-                              {personaData.name}
-                            </h4>
-                            <p style={{ fontSize: '14px', color: '#6B7280' }}>
-                              {personaData.title}
-                            </p>
+                            <h4 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', marginBottom: '4px' }}>{personaData.name}</h4>
+                            <p style={{ fontSize: '14px', color: '#6B7280' }}>{personaData.title}</p>
                           </>
                         )}
                       </div>
@@ -1277,16 +1345,14 @@ export default function App() {
                     {/* Professional Summary */}
                     <div className="mb-6">
                       <div className="flex items-center justify-between mb-2">
-                        <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937' }}>
-                          Professional Summary
-                        </h4>
-                        <span 
+                        <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937' }}>Professional Summary</h4>
+                        <span
                           className="rounded-full px-2 py-1"
-                          style={{ 
+                          style={{
                             backgroundColor: 'rgba(20, 184, 166, 0.1)',
                             color: '#14B8A6',
                             fontSize: '12px',
-                            fontWeight: 500
+                            fontWeight: 500,
                           }}
                         >
                           AI Generated
@@ -1306,39 +1372,32 @@ export default function App() {
                             borderColor: '#D1D5DB',
                             fontSize: '14px',
                             color: '#6B7280',
-                            lineHeight: '1.6'
+                            lineHeight: '1.6',
                           }}
                         />
                       ) : (
-                        <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>
-                          {personaData.summary}
-                        </p>
+                        <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>{personaData.summary}</p>
                       )}
                     </div>
 
                     {/* Skills */}
                     <div className="mb-6">
-                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>
-                        Skills
-                      </h4>
+                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Skills</h4>
                       <div className="flex flex-wrap gap-2">
                         {personaData.skills.map((skill, idx) => (
-                          <span 
+                          <span
                             key={idx}
                             className="rounded-full px-3 py-1.5 flex items-center gap-2 group"
-                            style={{ 
+                            style={{
                               backgroundColor: '#F3F4F6',
                               color: '#1F2937',
                               fontSize: '12px',
-                              fontWeight: 500
+                              fontWeight: 500,
                             }}
                           >
                             {skill}
                             {isEditable && (
-                              <button
-                                onClick={() => removeSkill(skill)}
-                                className="opacity-60 hover:opacity-100"
-                              >
+                              <button onClick={() => removeSkill(skill)} className="opacity-60 hover:opacity-100">
                                 <X size={14} />
                               </button>
                             )}
@@ -1374,7 +1433,7 @@ export default function App() {
                               fontSize: '12px',
                               fontWeight: 500,
                               outline: 'none',
-                              minWidth: '100px'
+                              minWidth: '100px',
                             }}
                             placeholder="Type skill..."
                           />
@@ -1390,7 +1449,7 @@ export default function App() {
                               borderColor: '#D1D5DB',
                               color: '#6B7280',
                               fontSize: '12px',
-                              fontWeight: 500
+                              fontWeight: 500,
                             }}
                           >
                             <Plus size={14} />
@@ -1402,16 +1461,10 @@ export default function App() {
 
                     {/* Key Experiences */}
                     <div className="mb-6">
-                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>
-                        Key Experiences
-                      </h4>
+                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Key Experiences</h4>
                       <div className="space-y-4">
                         {personaData.experiences.map((exp) => (
-                          <div 
-                            key={exp.id}
-                            className="pb-4 group"
-                            style={{ borderBottom: '1px solid #D1D5DB' }}
-                          >
+                          <div key={exp.id} className="pb-4 group" style={{ borderBottom: '1px solid #D1D5DB' }}>
                             <div className="flex justify-between items-start mb-2">
                               <div className="flex-1">
                                 {isEditable ? (
@@ -1421,9 +1474,7 @@ export default function App() {
                                       value={exp.role}
                                       onChange={(e) => {
                                         const value = e.target.value;
-                                        const updated = personaData.experiences.map(item => 
-                                          item.id === exp.id ? { ...item, role: value } : item
-                                        );
+                                        const updated = personaData.experiences.map((item) => (item.id === exp.id ? { ...item, role: value } : item));
                                         setPersonaData({ ...personaData, experiences: updated });
                                         setHasUnsavedChanges(true);
                                       }}
@@ -1432,7 +1483,7 @@ export default function App() {
                                         fontSize: '14px',
                                         fontWeight: 600,
                                         color: '#1F2937',
-                                        borderColor: '#D1D5DB'
+                                        borderColor: '#D1D5DB',
                                       }}
                                     />
                                     <input
@@ -1440,9 +1491,7 @@ export default function App() {
                                       value={exp.company}
                                       onChange={(e) => {
                                         const value = e.target.value;
-                                        const updated = personaData.experiences.map(item => 
-                                          item.id === exp.id ? { ...item, company: value } : item
-                                        );
+                                        const updated = personaData.experiences.map((item) => (item.id === exp.id ? { ...item, company: value } : item));
                                         setPersonaData({ ...personaData, experiences: updated });
                                         setHasUnsavedChanges(true);
                                       }}
@@ -1450,18 +1499,14 @@ export default function App() {
                                       style={{
                                         fontSize: '14px',
                                         color: '#6B7280',
-                                        borderColor: '#D1D5DB'
+                                        borderColor: '#D1D5DB',
                                       }}
                                     />
                                   </>
                                 ) : (
                                   <>
-                                    <h5 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937' }}>
-                                      {exp.role}
-                                    </h5>
-                                    <p style={{ fontSize: '14px', color: '#6B7280' }}>
-                                      {exp.company}
-                                    </p>
+                                    <h5 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937' }}>{exp.role}</h5>
+                                    <p style={{ fontSize: '14px', color: '#6B7280' }}>{exp.company}</p>
                                   </>
                                 )}
                               </div>
@@ -1472,9 +1517,7 @@ export default function App() {
                                     value={exp.date}
                                     onChange={(e) => {
                                       const value = e.target.value;
-                                      const updated = personaData.experiences.map(item => 
-                                        item.id === exp.id ? { ...item, date: value } : item
-                                      );
+                                      const updated = personaData.experiences.map((item) => (item.id === exp.id ? { ...item, date: value } : item));
                                       setPersonaData({ ...personaData, experiences: updated });
                                       setHasUnsavedChanges(true);
                                     }}
@@ -1483,13 +1526,11 @@ export default function App() {
                                       fontSize: '12px',
                                       color: '#6B7280',
                                       borderColor: '#D1D5DB',
-                                      width: '110px'
+                                      width: '110px',
                                     }}
                                   />
                                 ) : (
-                                  <span style={{ fontSize: '12px', color: '#6B7280' }}>
-                                    {exp.date}
-                                  </span>
+                                  <span style={{ fontSize: '12px', color: '#6B7280' }}>{exp.date}</span>
                                 )}
                                 {isEditable && (
                                   <button
@@ -1507,9 +1548,7 @@ export default function App() {
                                 value={exp.description}
                                 onChange={(e) => {
                                   const value = e.target.value;
-                                  const updated = personaData.experiences.map(item => 
-                                    item.id === exp.id ? { ...item, description: value } : item
-                                  );
+                                  const updated = personaData.experiences.map((item) => (item.id === exp.id ? { ...item, description: value } : item));
                                   setPersonaData({ ...personaData, experiences: updated });
                                   setHasUnsavedChanges(true);
                                 }}
@@ -1519,13 +1558,11 @@ export default function App() {
                                   fontSize: '14px',
                                   color: '#6B7280',
                                   lineHeight: '1.6',
-                                  borderColor: '#D1D5DB'
+                                  borderColor: '#D1D5DB',
                                 }}
                               />
                             ) : (
-                              <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>
-                                {exp.description}
-                              </p>
+                              <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>{exp.description}</p>
                             )}
                           </div>
                         ))}
@@ -1539,11 +1576,11 @@ export default function App() {
                               role: 'New Role',
                               company: 'Company Name',
                               date: '2024 - Present',
-                              description: 'Description of responsibilities and achievements.'
+                              description: 'Description of responsibilities and achievements.',
                             };
                             setPersonaData({
                               ...personaData,
-                              experiences: [...personaData.experiences, newExp]
+                              experiences: [...personaData.experiences, newExp],
                             });
                             setHasUnsavedChanges(true);
                           }}
@@ -1552,7 +1589,7 @@ export default function App() {
                             borderColor: '#D1D5DB',
                             color: '#6B7280',
                             fontSize: '14px',
-                            fontWeight: 500
+                            fontWeight: 500,
                           }}
                         >
                           <Plus size={16} />
@@ -1563,23 +1600,12 @@ export default function App() {
 
                     {/* Career Highlights */}
                     <div>
-                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>
-                        Career Highlights
-                      </h4>
+                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Career Highlights</h4>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         {personaData.careerHighlights.map((highlight, idx) => (
-                          <div
-                            key={idx}
-                            className="p-3 rounded-lg border flex items-start gap-2"
-                            style={{ 
-                              borderColor: '#D1D5DB',
-                              backgroundColor: '#FAFAFA'
-                            }}
-                          >
+                          <div key={idx} className="p-3 rounded-lg border flex items-start gap-2" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
                             <Award size={16} style={{ color: '#14B8A6', marginTop: '2px', flexShrink: 0 }} />
-                            <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5' }}>
-                              {highlight}
-                            </p>
+                            <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5' }}>{highlight}</p>
                           </div>
                         ))}
                       </div>
@@ -1598,10 +1624,10 @@ export default function App() {
                   exit={{ y: 100, opacity: 0 }}
                   transition={{ duration: 0.3 }}
                   className="fixed bottom-0 left-0 right-0 bg-white border-t"
-                  style={{ 
+                  style={{
                     borderColor: '#D1D5DB',
                     padding: '16px 32px',
-                    boxShadow: '0px -4px 12px rgba(0, 0, 0, 0.05)'
+                    boxShadow: '0px -4px 12px rgba(0, 0, 0, 0.05)',
                   }}
                 >
                   <div className="max-w-7xl mx-auto flex items-center justify-between">
@@ -1614,7 +1640,7 @@ export default function App() {
                         color: '#6B7280',
                         border: '1px solid #D1D5DB',
                         fontSize: '14px',
-                        fontWeight: 500
+                        fontWeight: 500,
                       }}
                     >
                       Discard Draft
@@ -1628,7 +1654,7 @@ export default function App() {
                         color: 'white',
                         border: 'none',
                         fontSize: '14px',
-                        fontWeight: 500
+                        fontWeight: 500,
                       }}
                       onMouseEnter={(e) => {
                         e.currentTarget.style.backgroundColor = '#0FB9B1';
@@ -1648,38 +1674,33 @@ export default function App() {
 
         {/* Finalized State */}
         {state === 'finalized' && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3 }}
-            className="max-w-4xl mx-auto"
-          >
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="max-w-4xl mx-auto">
             <button
-  onClick={() => setState('draft')}
-  className="mb-6 flex items-center gap-2 transition-all duration-200 hover:opacity-80"
-  style={{
-    color: '#14B8A6',
-    fontWeight: 500,
-    fontSize: '14px',
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer'
-  }}
->
-  ← Go Back
-</button>
-            <h2 
+              onClick={() => setState('draft')}
+              className="mb-6 flex items-center gap-2 transition-all duration-200 hover:opacity-80"
+              style={{
+                color: '#14B8A6',
+                fontWeight: 500,
+                fontSize: '14px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+              }}
+            >
+              ← Go Back
+            </button>
+            <h2
               onMouseEnter={() => setIsHoveringHeading(true)}
               onMouseLeave={() => setIsHoveringHeading(false)}
               className="relative inline-block cursor-default mx-auto"
-              style={{ 
-                fontSize: '32px', 
-                fontWeight: 700, 
-                color: '#14B8A6', 
-                marginBottom: '32px', 
+              style={{
+                fontSize: '32px',
+                fontWeight: 700,
+                color: '#14B8A6',
+                marginBottom: '32px',
                 textAlign: 'center',
                 display: 'block',
-                transition: 'filter 0.3s ease'
+                transition: 'filter 0.3s ease',
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.filter = 'drop-shadow(0 0 8px rgba(20, 184, 166, 0.4))';
@@ -1703,21 +1724,21 @@ export default function App() {
                     height: '2px',
                     backgroundColor: '#14B8A6',
                     boxShadow: '0 0 8px rgba(20, 184, 166, 0.4)',
-                    transformOrigin: 'left'
+                    transformOrigin: 'left',
                   }}
                 />
               )}
             </h2>
 
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, scale: 0.98 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.3, delay: 0.1 }}
               className="bg-white rounded-xl transition-all duration-300"
-              style={{ 
+              style={{
                 boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.05)',
                 padding: '32px',
-                border: '1px solid rgba(20, 184, 166, 0.3)'
+                border: '1px solid rgba(20, 184, 166, 0.3)',
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.boxShadow = '0px 8px 20px rgba(20, 184, 166, 0.2)';
@@ -1729,56 +1750,30 @@ export default function App() {
               {/* Persona Header */}
               <div className="flex items-center gap-4 mb-8 pb-6" style={{ borderBottom: '1px solid #D1D5DB' }}>
                 {personaData.profileImage ? (
-                  <img
-                    src={personaData.profileImage}
-                    alt="Profile"
-                    className="w-20 h-20 rounded-full object-cover flex-shrink-0"
-                  />
+                  <img src={personaData.profileImage} alt="Profile" className="w-20 h-20 rounded-full object-cover flex-shrink-0" />
                 ) : (
-                  <div 
-                    className="w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0"
-                    style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '28px', fontWeight: 600 }}
-                  >
-                    {personaData.name.split(' ').map(n => n[0]).join('')}
+                  <div className="w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0" style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '28px', fontWeight: 600 }}>
+                    {personaData.name.split(' ').map((n) => n[0]).join('')}
                   </div>
                 )}
                 <div>
-                  <h3 style={{ fontSize: '24px', fontWeight: 600, color: '#1F2937', marginBottom: '4px' }}>
-                    {personaData.name}
-                  </h3>
-                  <p style={{ fontSize: '16px', color: '#6B7280' }}>
-                    {personaData.title}
-                  </p>
+                  <h3 style={{ fontSize: '24px', fontWeight: 600, color: '#1F2937', marginBottom: '4px' }}>{personaData.name}</h3>
+                  <p style={{ fontSize: '16px', color: '#6B7280' }}>{personaData.title}</p>
                 </div>
               </div>
 
               {/* Professional Summary */}
               <div className="mb-8">
-                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>
-                  Professional Summary
-                </h4>
-                <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>
-                  {personaData.summary}
-                </p>
+                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Professional Summary</h4>
+                <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>{personaData.summary}</p>
               </div>
 
               {/* Skills */}
               <div className="mb-8">
-                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>
-                  Skills
-                </h4>
+                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Skills</h4>
                 <div className="flex flex-wrap gap-2">
                   {personaData.skills.map((skill, idx) => (
-                    <span 
-                      key={idx}
-                      className="rounded-full px-3 py-1.5"
-                      style={{ 
-                        backgroundColor: '#F3F4F6',
-                        color: '#1F2937',
-                        fontSize: '12px',
-                        fontWeight: 500
-                      }}
-                    >
+                    <span key={idx} className="rounded-full px-3 py-1.5" style={{ backgroundColor: '#F3F4F6', color: '#1F2937', fontSize: '12px', fontWeight: 500 }}>
                       {skill}
                     </span>
                   ))}
@@ -1787,28 +1782,18 @@ export default function App() {
 
               {/* Key Experiences */}
               <div className="mb-8">
-                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>
-                  Key Experiences
-                </h4>
+                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Key Experiences</h4>
                 <div className="space-y-6">
                   {personaData.experiences.map((exp) => (
                     <div key={exp.id}>
                       <div className="flex justify-between items-start mb-2">
                         <div>
-                          <h5 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937' }}>
-                            {exp.role}
-                          </h5>
-                          <p style={{ fontSize: '14px', color: '#6B7280' }}>
-                            {exp.company}
-                          </p>
+                          <h5 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937' }}>{exp.role}</h5>
+                          <p style={{ fontSize: '14px', color: '#6B7280' }}>{exp.company}</p>
                         </div>
-                        <span style={{ fontSize: '12px', color: '#6B7280' }}>
-                          {exp.date}
-                        </span>
+                        <span style={{ fontSize: '12px', color: '#6B7280' }}>{exp.date}</span>
                       </div>
-                      <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>
-                        {exp.description}
-                      </p>
+                      <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>{exp.description}</p>
                     </div>
                   ))}
                 </div>
@@ -1816,23 +1801,12 @@ export default function App() {
 
               {/* Career Highlights */}
               <div className="mb-8">
-                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>
-                  Career Highlights
-                </h4>
+                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Career Highlights</h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {personaData.careerHighlights.map((highlight, idx) => (
-                    <div
-                      key={idx}
-                      className="p-3 rounded-lg border flex items-start gap-2"
-                      style={{
-                        borderColor: '#D1D5DB',
-                        backgroundColor: '#FAFAFA',
-                      }}
-                    >
+                    <div key={idx} className="p-3 rounded-lg border flex items-start gap-2" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
                       <Award size={16} style={{ color: '#14B8A6', marginTop: '2px', flexShrink: 0 }} />
-                      <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5' }}>
-                        {highlight}
-                      </p>
+                      <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5' }}>{highlight}</p>
                     </div>
                   ))}
                 </div>
@@ -1840,9 +1814,7 @@ export default function App() {
 
               {/* Version history (finalized) */}
               <div>
-                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>
-                  Version History
-                </h4>
+                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Version History</h4>
 
                 {isLoadingVersions ? (
                   <div className="flex items-center gap-2" style={{ color: '#6B7280', fontSize: '13px' }}>
@@ -1852,9 +1824,7 @@ export default function App() {
                 ) : versionsError ? (
                   <div style={{ color: '#DC2626', fontSize: '13px' }}>{versionsError}</div>
                 ) : versions.length === 0 ? (
-                  <div style={{ color: '#6B7280', fontSize: '13px' }}>
-                    {personaId ? 'No versions found yet.' : 'No saved persona yet (versions available after save).'}
-                  </div>
+                  <div style={{ color: '#6B7280', fontSize: '13px' }}>{personaId ? 'No versions found yet.' : 'No saved persona yet (versions available after save).'}</div>
                 ) : (
                   <div className="space-y-2">
                     {versions.slice(0, 10).map((v) => (
