@@ -525,6 +525,11 @@ export default function App() {
 
   const handleGenerateDraft = async () => {
     const generationId = ++generationIdRef.current;
+
+    // Reset the circuit-breaker memory so a retry/new upload can't be blocked by an old build's artifact hash.
+    // (Authoritative instruction from user_input_ref)
+    lastAppliedPersonaArtifactJsonRef.current = {};
+
     // eslint-disable-next-line no-console
     console.log(`[draft][gen:${generationId}] handleGenerateDraft start`, {
       state,
@@ -533,9 +538,6 @@ export default function App() {
       existingBuildId: buildId,
       existingPersonaId: personaId,
     });
-
-    // Reset artifact hash cache on a new generation so the next build's artifacts are applied.
-    lastAppliedPersonaArtifactJsonRef.current = {};
 
     // Clear prior error guard on explicit user action.
     setHasError(false);
@@ -746,7 +748,7 @@ export default function App() {
         // Keep the processing screen visible so the user sees the backend error banner.
         setState('processing');
       }
-    }, 2000);
+    }, 2000); // Polling interval intentionally 2000ms (reduced churn vs 800ms; per stability instructions)
 
     return () => {
       cancelled = true;
@@ -791,12 +793,19 @@ export default function App() {
         if (personaJson && isNonEmptyObject(personaJson)) {
           const artifactJson = safeJsonStringify(personaJson);
 
+          // Double-gate circuit breaker:
+          // Gate 1: Only consider applying if artifact JSON differs from what we've already applied for this build.
+          // Gate 2: Only commit state (and update the ref) if coercion actually changes UI-visible fields.
           if (artifactJson !== lastAppliedPersonaArtifactJsonRef.current[buildId]) {
             setPersonaData((prev) => {
               const next = coercePersonaDataFromBackendJson(personaJson, prev);
-              if (JSON.stringify(next) === JSON.stringify(prev)) return prev;
 
-              // CRITICAL: Update the ref ONLY here
+              // Check 1: Did the coercion actually change any visible UI fields?
+              if (JSON.stringify(next) === JSON.stringify(prev)) {
+                return prev;
+              }
+
+              // Check 2: Update the ref ONLY if we are actually committing the change to state.
               lastAppliedPersonaArtifactJsonRef.current[buildId] = artifactJson;
               return next;
             });
