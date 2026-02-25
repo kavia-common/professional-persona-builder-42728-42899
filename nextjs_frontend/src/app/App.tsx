@@ -371,32 +371,58 @@ export default function App() {
   const isOpeningFilePickerRef = useRef(false);
 
   /**
-   * Chrome freeze mitigation (dialog close):
-   * When the OS file picker closes (especially on cancel), Chrome can emit a burst of
-   * focus/mouse events. If our UI responds by imperatively mutating styles on large containers
-   * (onMouseEnter/onMouseLeave) and running layout-affecting transitions, it can trigger
-   * layout thrash that *looks like a browser hang*.
+   * Chrome freeze mitigation (dialog open + close):
    *
-   * Strategy: while the dialog is open (and for a short cooldown after focus returns),
-   * we temporarily disable hover-driven style mutations.
+   * Symptom:
+   * - When the OS file picker is open, Chrome can become unresponsive if the page keeps doing
+   *   expensive style writes/animations (e.g., hover handlers that mutate inline styles,
+   *   Framer Motion layout/opacity transitions, etc.).
+   *
+   * Root cause:
+   * - Even if file-input click re-entrancy is guarded, the UI can still receive a stream of
+   *   mouse/focus/paint events while the native dialog is displayed.
+   * - Inline style mutations on mouseenter/mouseleave are particularly risky because they
+   *   can force style/layout recalculation repeatedly.
+   *
+   * Strategy:
+   * - Maintain a robust "file dialog active" lock.
+   * - While active, disable all hover-driven style writes and avoid mounting non-essential
+   *   motion/AnimatePresence UI that may schedule work.
+   * - On dialog close (focus returns), keep a short cooldown window to absorb event bursts.
    */
   const fileDialogActiveRef = useRef(false);
   const fileDialogCooldownUntilRef = useRef<number>(0);
   const FILE_DIALOG_COOLDOWN_MS = 650;
 
+  /**
+   * React state mirror of dialog activity so we can disable motion/hover via render-time conditionals.
+   * This should only toggle on open and on close (focus/change/cancel), so it won't create render loops.
+   */
+  const [isFileDialogActive, setIsFileDialogActive] = useState(false);
+
+  const markFileDialogActive = useCallback(() => {
+    fileDialogActiveRef.current = true;
+    if (isMountedRef.current) setIsFileDialogActive(true);
+  }, []);
+
+  const markFileDialogInactive = useCallback(() => {
+    fileDialogActiveRef.current = false;
+    fileDialogCooldownUntilRef.current = Date.now() + FILE_DIALOG_COOLDOWN_MS;
+    if (isMountedRef.current) setIsFileDialogActive(false);
+  }, []);
+
   useEffect(() => {
     const onWindowFocus = () => {
       // If we previously opened a dialog, treat focus return as dialog close.
       if (!fileDialogActiveRef.current) return;
-      fileDialogActiveRef.current = false;
-      fileDialogCooldownUntilRef.current = Date.now() + FILE_DIALOG_COOLDOWN_MS;
+      markFileDialogInactive();
     };
 
     window.addEventListener('focus', onWindowFocus);
     return () => {
       window.removeEventListener('focus', onWindowFocus);
     };
-  }, []);
+  }, [markFileDialogInactive]);
 
   const shouldAllowHoverEffects = useCallback((): boolean => {
     if (fileDialogActiveRef.current) return false;
@@ -409,14 +435,9 @@ export default function App() {
       /**
        * Opens a hidden <input type="file"> in a safe, non-reentrant way.
        *
-       * Chrome-specific freeze fix:
-       * - Calling input.click() synchronously inside a React click handler can re-enter via
-       *   focus/click side-effects and produce an event storm (appears like a hang).
-       * - Deferring the actual click to the next tick breaks same-stack recursion while
-       *   preserving the "user gesture" in practice for file dialogs.
-       *
-       * Additional mitigation:
-       * - Mark dialog as active so we can suppress hover/layout effects until focus returns.
+       * Additional mitigations:
+       * - Marks dialog as active (render + ref) so we can suppress hover/motion while the OS picker is open.
+       * - Defers click() to break same-stack focus/click recursion.
        */
       if (e) {
         e.preventDefault();
@@ -432,12 +453,10 @@ export default function App() {
       isOpeningFilePickerRef.current = true;
 
       // Mark dialog as active immediately (before we defer click()).
-      fileDialogActiveRef.current = true;
+      markFileDialogActive();
 
       try {
-        // Break synchronous focus/click recursion by deferring to the next tick.
         setTimeout(() => {
-          // Input might be unmounted by the time this runs; guard with optional chaining.
           inputRef.current?.click();
         }, 0);
       } finally {
@@ -447,18 +466,17 @@ export default function App() {
         }, 1000);
 
         /**
-         * Fallback: if the browser doesn't emit focus (edge cases), still release "active"
-         * after a reasonable window so the UI doesn't remain in a hover-disabled state.
+         * Fallback: if the browser doesn't emit focus/change/cancel (edge cases),
+         * still release "active" after a reasonable window.
          */
         setTimeout(() => {
           if (fileDialogActiveRef.current) {
-            fileDialogActiveRef.current = false;
-            fileDialogCooldownUntilRef.current = Date.now() + FILE_DIALOG_COOLDOWN_MS;
+            markFileDialogInactive();
           }
         }, 4000);
       }
     },
-    []
+    [markFileDialogActive, markFileDialogInactive]
   );
 
   // PUBLIC_INTERFACE
@@ -581,6 +599,13 @@ export default function App() {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     // Prevent bubbling into any parent click handlers (and avoid any chance of recursive click loops/freezes).
     e.stopPropagation();
+
+    // If we get an onChange, the dialog has effectively completed.
+    if (fileDialogActiveRef.current) {
+      fileDialogActiveRef.current = false;
+      fileDialogCooldownUntilRef.current = Date.now() + FILE_DIALOG_COOLDOWN_MS;
+      setIsFileDialogActive(false);
+    }
 
     if (!e.target.files) return;
 
@@ -1238,7 +1263,7 @@ export default function App() {
             </button>
 
             <AnimatePresence>
-              {isProfileOpen && (
+              {!isFileDialogActive && isProfileOpen && (
                 <motion.div
                   initial={{ opacity: 0, y: -10 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -1430,6 +1455,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={openFilePicker}
+                  disabled={isFileDialogActive}
                   className="inline-flex items-center justify-center rounded-lg transition-all duration-200"
                   style={{
                     backgroundColor: '#14B8A6',
@@ -1438,12 +1464,15 @@ export default function App() {
                     fontSize: '14px',
                     fontWeight: 600,
                     border: 'none',
-                    cursor: 'pointer',
+                    cursor: isFileDialogActive ? 'not-allowed' : 'pointer',
+                    opacity: isFileDialogActive ? 0.85 : 1,
                   }}
                   onMouseEnter={(e) => {
+                    if (!shouldAllowHoverEffects()) return;
                     e.currentTarget.style.backgroundColor = '#0FB9B1';
                   }}
                   onMouseLeave={(e) => {
+                    if (!shouldAllowHoverEffects()) return;
                     e.currentTarget.style.backgroundColor = '#14B8A6';
                   }}
                 >
@@ -1548,8 +1577,14 @@ export default function App() {
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.3 }}
-              onMouseEnter={() => setIsHoveringHeading(true)}
-              onMouseLeave={() => setIsHoveringHeading(false)}
+              onMouseEnter={() => {
+                if (isFileDialogActive) return;
+                setIsHoveringHeading(true);
+              }}
+              onMouseLeave={() => {
+                if (isFileDialogActive) return;
+                setIsHoveringHeading(false);
+              }}
               className="relative inline-block cursor-default mx-auto"
               style={{
                 fontSize: state === 'draft' ? '36px' : '32px',
@@ -1562,7 +1597,7 @@ export default function App() {
               }}
             >
               {state === 'processing' ? 'View Current State Persona' : 'Draft Persona'}
-              {state === 'draft' && isHoveringHeading && (
+              {state === 'draft' && isHoveringHeading && !isFileDialogActive && (
                 <motion.div
                   initial={{ scaleX: 0 }}
                   animate={{ scaleX: 1 }}
