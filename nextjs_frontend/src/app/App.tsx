@@ -140,21 +140,22 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
    * PUBLIC_INTERFACE
    * Extract persona JSON from the orchestration record.
    *
-   * Requirement: orchestration response may store persona JSON under:
-   *   artifacts.output.personaJson
-   * plus some legacy/alternate locations.
+   * IMPORTANT:
+   * Some orchestration envelopes contain non-persona objects early in the candidate list
+   * (e.g. results.generate = { personaId: ... }), which are truthy and can incorrectly “win”.
    *
-   * We also prefer final persona when present, else draft.
+   * To prevent the UI from sticking on empty fallback persona, we:
+   * 1) Prefer candidates that look like an actual persona payload (draft/final JSON)
+   * 2) Fall back to the first non-null candidate only if no persona-shaped object exists
+   *    (and log that scenario for debugging).
    */
   const candidates: Array<Array<string>> = [
-    // REQUIRED by task (exact new location)
+    // Most likely canonical locations
     ['artifacts', 'output', 'personaJson'],
-
-    // REQUIRED by task: artifacts may store draft/final persona directly
-    ['artifacts', 'draftPersona'],
     ['artifacts', 'finalPersona'],
+    ['artifacts', 'draftPersona'],
 
-    // Additional observed/legacy possibilities (keep these for robustness)
+    // Legacy/alternate locations
     ['artifacts', 'personaJson'],
     ['artifacts', 'final', 'personaJson'],
     ['artifacts', 'draft', 'personaJson'],
@@ -169,12 +170,63 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
     ['persona'],
   ];
 
+  const looksLikePersona = (value: any): boolean => {
+    if (!isNonEmptyObject(value)) return false;
+
+    // Observed “current state persona” format
+    if (
+      typeof (value as any).professional_summary === 'string' ||
+      Array.isArray((value as any).core_competencies) ||
+      Array.isArray((value as any).career_highlights) ||
+      isNonEmptyObject((value as any).technical_stack)
+    ) {
+      return true;
+    }
+
+    // Backend PersonaDraft shape (from OpenAPI)
+    if (
+      typeof (value as any).title === 'string' ||
+      typeof (value as any).summary === 'string' ||
+      Array.isArray((value as any).skills) ||
+      isNonEmptyObject((value as any).profile)
+    ) {
+      return true;
+    }
+
+    return false;
+  };
+
+  let firstNonNull: { personaJson: any; sourcePath: string } | null = null;
+
   for (const path of candidates) {
     const hit = getNestedOrchestrationValue(orch, path);
-    if (hit?.value !== undefined && hit?.value !== null) {
+    if (hit?.value === undefined || hit?.value === null) continue;
+
+    // Keep the first non-null in case nothing persona-shaped exists.
+    if (!firstNonNull) firstNonNull = { personaJson: hit.value, sourcePath: hit.foundPath };
+
+    if (looksLikePersona(hit.value)) {
       return { personaJson: hit.value, sourcePath: hit.foundPath };
     }
+
+    // eslint-disable-next-line no-console
+    console.log('[persona][extract] rejected candidate (not persona-shaped)', {
+      path: hit.foundPath,
+      type: Array.isArray(hit.value) ? 'array' : typeof hit.value,
+      keys: isNonEmptyObject(hit.value) ? Object.keys(hit.value) : [],
+    });
   }
+
+  if (firstNonNull) {
+    // eslint-disable-next-line no-console
+    console.warn('[persona][extract] no persona-shaped candidate found; falling back to first non-null candidate', {
+      path: firstNonNull.sourcePath,
+      type: Array.isArray(firstNonNull.personaJson) ? 'array' : typeof firstNonNull.personaJson,
+      keys: isNonEmptyObject(firstNonNull.personaJson) ? Object.keys(firstNonNull.personaJson) : [],
+    });
+    return { personaJson: firstNonNull.personaJson, sourcePath: firstNonNull.sourcePath };
+  }
+
   return { personaJson: null, sourcePath: null };
 }
 
@@ -356,8 +408,13 @@ export default function App() {
   const personaSummary = personaData?.summary ?? '';
 
   // Requested: top-of-component render log (helps diagnose loops + data churn)
-  // eslint-disable-next-line no-console
-  console.log('Rendering with data:', personaData);
+  // Throttle so it doesn't spam the console and appear like an infinite loop.
+  const lastRenderLogAtRef = useRef<number>(0);
+  if (nowMs - lastRenderLogAtRef.current > 1200) {
+    lastRenderLogAtRef.current = nowMs;
+    // eslint-disable-next-line no-console
+    console.log('Rendering with data:', personaData);
+  }
 
   // Render-loop diagnostics logging (after primitives exist).
   if (renderDiagRef.current.count >= 30) {
@@ -715,9 +772,16 @@ export default function App() {
         const extracted = extractPersonaJsonFromOrchestrationRecord(orch);
         const personaJson = extracted.personaJson;
 
+        // Small preview (avoid dumping huge payloads).
+        const preview =
+          personaJson && typeof personaJson === 'object'
+            ? safeJsonStringify(personaJson).slice(0, 600)
+            : String(personaJson).slice(0, 200);
+
         console.log(`[artifacts][gen:${generationId}] extracted personaJson`, {
           sourcePath: extracted.sourcePath,
           personaJsonType: personaJson === null ? 'null' : Array.isArray(personaJson) ? 'array' : typeof personaJson,
+          preview,
         });
 
         if (!personaJson) {
