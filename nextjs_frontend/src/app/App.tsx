@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Upload, Loader2, X, Edit3, Plus, CheckCircle2, Camera, Award, Compass, User } from 'lucide-react';
+import { Upload, Loader2, X, Edit3, Plus, CheckCircle2, Camera, Award, Compass } from 'lucide-react';
 import {
   getBuildStatus,
   listPersonaVersions,
@@ -1367,26 +1367,49 @@ export default function App() {
             <div className="flex flex-col">
               <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', margin: 0 }}>Career Navigator</h1>
 
-              {/* "This is your profile" indicator + name/role */}
-              <div className="flex items-center gap-2" style={{ marginTop: '2px' }}>
-                <span
-                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5"
+              {/* Per request: remove "Your Profile" label; show initials + full name + role */}
+              <div className="flex items-center gap-2" style={{ marginTop: '6px' }}>
+                <div
+                  className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0"
                   style={{
-                    backgroundColor: 'rgba(20, 184, 166, 0.10)',
+                    backgroundColor: 'rgba(20, 184, 166, 0.12)',
+                    border: '1px solid rgba(20, 184, 166, 0.35)',
                     color: '#0F766E',
                     fontSize: '12px',
-                    fontWeight: 600,
+                    fontWeight: 700,
                   }}
-                  aria-label="Your profile"
-                  title="Your profile"
+                  aria-label="User initials"
+                  title={personaName || 'User'}
                 >
-                  <User size={14} />
-                  Your Profile
-                </span>
+                  {avatarInitials}
+                </div>
 
-                <span style={{ fontSize: '12px', color: '#6B7280', fontWeight: 500 }}>
-                  {(personaName || '—') + (personaTitle ? ` · ${personaTitle}` : '')}
-                </span>
+                <div className="min-w-0 flex flex-col">
+                  <span
+                    style={{
+                      fontSize: '12px',
+                      color: '#111827',
+                      fontWeight: 600,
+                      lineHeight: '1.1',
+                    }}
+                    className="truncate"
+                    title={personaName || '—'}
+                  >
+                    {personaName || '—'}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: '12px',
+                      color: '#6B7280',
+                      fontWeight: 500,
+                      lineHeight: '1.1',
+                    }}
+                    className="truncate"
+                    title={personaTitle || ''}
+                  >
+                    {personaTitle || ''}
+                  </span>
+                </div>
               </div>
             </div>
           </div>
@@ -1457,7 +1480,10 @@ export default function App() {
             </span>
           </div>
 
-          <div className="h-0.5 w-12 transition-colors duration-300" style={{ backgroundColor: step1Complete ? '#14B8A6' : '#D1D5DB' }} />
+          <div
+            className="h-0.5 w-12 transition-colors duration-300"
+            style={{ backgroundColor: step1Complete ? '#14B8A6' : '#D1D5DB' }}
+          />
 
           <div className="flex items-center gap-3">
             <div
@@ -1483,7 +1509,10 @@ export default function App() {
             </span>
           </div>
 
-          <div className="h-0.5 w-12 transition-colors duration-300" style={{ backgroundColor: step2Complete ? '#14B8A6' : '#D1D5DB' }} />
+          <div
+            className="h-0.5 w-12 transition-colors duration-300"
+            style={{ backgroundColor: step2Complete ? '#14B8A6' : '#D1D5DB' }}
+          />
 
           <div className="flex items-center gap-3">
             <div
@@ -1515,7 +1544,12 @@ export default function App() {
       <main style={{ padding: state === 'finalized' ? '48px 32px' : '48px 32px' }}>
         {/* Initial State */}
         {state === 'initial' && (
-          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="max-w-2xl mx-auto text-center">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3 }}
+            className="max-w-2xl mx-auto text-center"
+          >
             <motion.h2
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -1540,7 +1574,9 @@ export default function App() {
                 key="static-underline"
               />
             </motion.h2>
-            <p style={{ fontSize: '16px', color: '#6B7280', marginBottom: '32px' }}>Upload your Professional Documents to generate your AI-powered Persona</p>
+            <p style={{ fontSize: '16px', color: '#6B7280', marginBottom: '32px' }}>
+              Upload your Professional Documents to generate your AI-powered Persona
+            </p>
 
             {/* Keep the file input OUTSIDE the clickable dropzone to avoid self-trigger loops */}
             <input
@@ -1593,7 +1629,9 @@ export default function App() {
                 <p style={{ fontSize: '16px', fontWeight: 500, color: '#1F2937', marginBottom: '8px' }}>
                   {uploadedFiles.length > 0 ? `${uploadedFiles.length} file(s) uploaded` : 'Upload your Documents '}
                 </p>
-                <p style={{ fontSize: '14px', color: '#6B7280' }}>Resume, Job Description, Performance Review, Certifications</p>
+                <p style={{ fontSize: '14px', color: '#6B7280' }}>
+                  Resume, Job Description, Performance Review, Certifications
+                </p>
                 <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '12px' }}>
                   Supported formats: PDF, DOCX, TXT (Max {MAX_FILES} files)
                 </p>
@@ -1642,7 +1680,12 @@ export default function App() {
               )}
 
               {uploadedFiles.length > 0 && (
-                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="mt-6 space-y-2">
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className="mt-6 space-y-2"
+                >
                   {uploadedFiles.map((fileData) => (
                     <div
                       key={fileData.id}
@@ -1662,7 +1705,9 @@ export default function App() {
                         >
                           {getFileType(fileData.file.name)}
                         </span>
-                        <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>{fileData.file.name}</span>
+                        <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>
+                          {fileData.file.name}
+                        </span>
                       </div>
                       <button
                         onClick={(e) => {
@@ -1717,7 +1762,7 @@ export default function App() {
             animate={{ opacity: 1 }}
             transition={{ duration: 0.3 }}
             className="max-w-7xl mx-auto"
-            style={{ paddingBottom: isEditable && state === 'draft' ? '100px' : '0' }}
+            style={{ paddingBottom: '0' }}
           >
             <motion.h2
               initial={{ opacity: 0, y: -20 }}
@@ -1805,19 +1850,30 @@ export default function App() {
                     e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
                   }}
                 >
-                  <h3 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '16px' }}>Uploaded Documents</h3>
+                  <h3 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '16px' }}>
+                    Uploaded Documents
+                  </h3>
 
                   <div className="space-y-3 mb-6">
                     {uploadedFiles.map((fileData) => (
                       <div key={fileData.id} className="flex items-center justify-between p-3 rounded-lg bg-gray-50">
                         <div className="flex items-center gap-3">
-                          <span className="px-2 py-1 rounded text-xs font-medium" style={{ backgroundColor: 'rgba(20, 184, 166, 0.1)', color: '#14B8A6' }}>
+                          <span
+                            className="px-2 py-1 rounded text-xs font-medium"
+                            style={{ backgroundColor: 'rgba(20, 184, 166, 0.1)', color: '#14B8A6' }}
+                          >
                             {getFileType(fileData.file.name)}
                           </span>
-                          <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>{fileData.file.name}</span>
+                          <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>
+                            {fileData.file.name}
+                          </span>
                         </div>
                         {state === 'draft' && (
-                          <button onClick={() => removeFile(fileData.id)} className="p-1 rounded hover:bg-gray-200 transition-colors" style={{ color: '#6B7280' }}>
+                          <button
+                            onClick={() => removeFile(fileData.id)}
+                            className="p-1 rounded hover:bg-gray-200 transition-colors"
+                            style={{ color: '#6B7280' }}
+                          >
                             <X size={16} />
                           </button>
                         )}
@@ -1838,7 +1894,9 @@ export default function App() {
                             fontWeight: 500,
                           }}
                         >
-                          {buildStatus ? `Processing (${buildStatus.progress}%)${buildStatus.currentStep ? ` · ${buildStatus.currentStep}` : ''}` : 'Processing...'}
+                          {buildStatus
+                            ? `Processing (${buildStatus.progress}%)${buildStatus.currentStep ? ` · ${buildStatus.currentStep}` : ''}`
+                            : 'Processing...'}
                         </span>
                       </>
                     ) : (
@@ -1878,7 +1936,9 @@ export default function App() {
                   {/* Version history (if persona exists / backend configured) */}
                   {state === 'draft' && (
                     <div className="mb-2">
-                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '10px' }}>Version History</h4>
+                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '10px' }}>
+                        Version History
+                      </h4>
 
                       {isLoadingVersions ? (
                         <div className="flex items-center gap-2" style={{ color: '#6B7280', fontSize: '13px' }}>
@@ -1888,13 +1948,17 @@ export default function App() {
                       ) : versionsError ? (
                         <div style={{ color: '#DC2626', fontSize: '13px' }}>{versionsError}</div>
                       ) : versions.length === 0 ? (
-                        <div style={{ color: '#6B7280', fontSize: '13px' }}>{personaId ? 'No versions found yet.' : 'No saved persona yet (versions available after save).'}</div>
+                        <div style={{ color: '#6B7280', fontSize: '13px' }}>
+                          {personaId ? 'No versions found yet.' : 'No saved persona yet (versions available after save).'}
+                        </div>
                       ) : (
                         <div className="space-y-2">
                           {versions.slice(0, 5).map((v) => (
                             <div key={v.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
                               <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>v{v.version}</div>
-                              <div style={{ fontSize: '12px', color: '#6B7280' }}>{new Date(v.createdAt).toLocaleString()}</div>
+                              <div style={{ fontSize: '12px', color: '#6B7280' }}>
+                                {new Date(v.createdAt).toLocaleString()}
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -1904,7 +1968,9 @@ export default function App() {
 
                   {state === 'draft' && (
                     <>
-                      <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '16px' }}>Draft persona generated successfully.</p>
+                      <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '16px' }}>
+                        Draft persona generated successfully.
+                      </p>
 
                       {uploadedFiles.length < MAX_FILES && (
                         <>
@@ -1944,7 +2010,12 @@ export default function App() {
 
               {/* Right Column - Draft Persona */}
               {state === 'draft' && (
-                <motion.div initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} transition={{ duration: 0.3, delay: 0.2 }} className="lg:col-span-3">
+                <motion.div
+                  initial={{ x: 20, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  transition={{ duration: 0.3, delay: 0.2 }}
+                  className="lg:col-span-3"
+                >
                   <div
                     className="bg-white rounded-xl transition-all duration-300"
                     style={{
@@ -1963,7 +2034,7 @@ export default function App() {
                       e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
                     }}
                   >
-                    <div className="flex items-center justify-between mb-6">
+                    <div className="flex items-center justify-between mb-6 gap-3 flex-wrap">
                       <h3
                         style={{
                           fontSize: '20px',
@@ -1980,29 +2051,71 @@ export default function App() {
                       >
                         Draft Persona
                       </h3>
-                      <div className="flex items-center gap-2">
+
+                      {/* Requested: Finalize/Discard available BEFORE saving changes */}
+                      <div className="flex flex-wrap items-center gap-2 justify-end">
+                        <button
+                          onClick={() => {
+                            setIsEditable(false);
+                            setHasUnsavedChanges(false);
+                          }}
+                          className="rounded-lg transition-colors"
+                          style={{
+                            padding: '8px 14px',
+                            backgroundColor: 'transparent',
+                            color: '#6B7280',
+                            border: '1px solid #D1D5DB',
+                            fontSize: '14px',
+                            fontWeight: 500,
+                          }}
+                        >
+                          Discard Draft
+                        </button>
+
+                        <button
+                          onClick={handleFinalize}
+                          className="rounded-lg transition-all duration-200"
+                          style={{
+                            padding: '8px 14px',
+                            backgroundColor: '#14B8A6',
+                            color: 'white',
+                            border: 'none',
+                            fontSize: '14px',
+                            fontWeight: 500,
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor = '#0FB9B1';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor = '#14B8A6';
+                          }}
+                        >
+                          Finalize Persona
+                        </button>
+
                         {isEditable && (
                           <button
                             onClick={handleSaveChanges}
                             className="flex items-center gap-2 rounded-lg transition-all duration-200"
                             style={{
-                              padding: '8px 16px',
-                              backgroundColor: '#14B8A6',
-                              color: 'white',
-                              border: 'none',
+                              padding: '8px 14px',
+                              backgroundColor: 'rgba(20, 184, 166, 0.10)',
+                              color: '#0F766E',
+                              border: '1px solid rgba(20, 184, 166, 0.35)',
                               fontSize: '14px',
-                              fontWeight: 500,
+                              fontWeight: 600,
                             }}
                             onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = '#0FB9B1';
+                              e.currentTarget.style.backgroundColor = 'rgba(20, 184, 166, 0.16)';
                             }}
                             onMouseLeave={(e) => {
-                              e.currentTarget.style.backgroundColor = '#14B8A6';
+                              e.currentTarget.style.backgroundColor = 'rgba(20, 184, 166, 0.10)';
                             }}
                           >
                             Save Changes
                           </button>
                         )}
+
                         <AnimatePresence>
                           {showSaveSuccess && (
                             <motion.span
@@ -2022,11 +2135,12 @@ export default function App() {
                             </motion.span>
                           )}
                         </AnimatePresence>
+
                         <button
                           onClick={() => setIsEditable(!isEditable)}
                           className="flex items-center gap-2 rounded-lg transition-colors"
                           style={{
-                            padding: '8px 16px',
+                            padding: '8px 14px',
                             backgroundColor: isEditable ? 'rgba(20, 184, 166, 0.1)' : 'transparent',
                             color: '#14B8A6',
                             border: '1px solid #14B8A6',
@@ -2115,6 +2229,7 @@ export default function App() {
                           </>
                         ) : (
                           <>
+                            {/* Full name with role beneath (requested) */}
                             <h4 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', marginBottom: '4px' }}>{personaData?.name ?? ''}</h4>
                             <p style={{ fontSize: '14px', color: '#6B7280' }}>{personaData?.title ?? ''}</p>
                           </>
@@ -2241,7 +2356,9 @@ export default function App() {
 
                     {/* Key Experiences */}
                     <div className="mb-6">
-                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Key Experiences</h4>
+                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>
+                        Key Experiences
+                      </h4>
                       <div className="space-y-4">
                         {(personaData?.experiences ?? []).map((exp) => (
                           <div key={exp.id} className="pb-4 group" style={{ borderBottom: '1px solid #D1D5DB' }}>
@@ -2380,7 +2497,9 @@ export default function App() {
 
                     {/* Career Highlights */}
                     <div>
-                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Career Highlights</h4>
+                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>
+                        Career Highlights
+                      </h4>
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         {(personaData?.careerHighlights ?? []).map((item, idx) => (
@@ -2390,21 +2509,43 @@ export default function App() {
                             style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}
                           >
                             <Award size={16} style={{ color: '#14B8A6', marginTop: '2px', flexShrink: 0 }} />
-                            <div className="min-w-0">
+                            <div className="min-w-0 w-full">
                               <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5', marginBottom: item.sourceExperience ? '6px' : 0 }}>
                                 {item.highlight}
                               </p>
 
+                              {/* Wrap source text within container (requested) */}
                               {item.sourceExperience && (
                                 <div
-                                  className="inline-flex items-center rounded-md px-2 py-1"
+                                  className="flex items-start gap-2 rounded-md px-2 py-1 w-full max-w-full"
                                   style={{
                                     backgroundColor: 'rgba(20, 184, 166, 0.10)',
                                     border: '1px solid rgba(20, 184, 166, 0.25)',
                                   }}
                                 >
-                                  <span style={{ fontSize: '12px', color: '#0F766E', fontWeight: 600, marginRight: '6px' }}>Source</span>
-                                  <span style={{ fontSize: '12px', color: '#0F766E', fontWeight: 500 }} className="truncate">
+                                  <span
+                                    style={{
+                                      fontSize: '12px',
+                                      color: '#0F766E',
+                                      fontWeight: 600,
+                                      flexShrink: 0,
+                                      lineHeight: '1.2',
+                                      marginTop: '1px',
+                                    }}
+                                  >
+                                    Source
+                                  </span>
+                                  <span
+                                    style={{
+                                      fontSize: '12px',
+                                      color: '#0F766E',
+                                      fontWeight: 500,
+                                      lineHeight: '1.2',
+                                      overflowWrap: 'anywhere',
+                                      wordBreak: 'break-word',
+                                    }}
+                                    className="min-w-0"
+                                  >
                                     {item.sourceExperience}
                                   </span>
                                 </div>
@@ -2424,61 +2565,6 @@ export default function App() {
                 </motion.div>
               )}
             </div>
-
-            {/* Sticky Bottom Bar */}
-            <AnimatePresence>
-              {isEditable && state === 'draft' && (
-                <motion.div
-                  initial={{ y: 100, opacity: 0 }}
-                  animate={{ y: 0, opacity: 1 }}
-                  exit={{ y: 100, opacity: 0 }}
-                  transition={{ duration: 0.3 }}
-                  className="fixed bottom-0 left-0 right-0 bg-white border-t"
-                  style={{
-                    borderColor: '#D1D5DB',
-                    padding: '16px 32px',
-                    boxShadow: '0px -4px 12px rgba(0, 0, 0, 0.05)',
-                  }}
-                >
-                  <div className="max-w-7xl mx-auto flex items-center justify-between">
-                    <button
-                      onClick={() => setIsEditable(false)}
-                      className="rounded-lg transition-colors"
-                      style={{
-                        padding: '12px 20px',
-                        backgroundColor: 'transparent',
-                        color: '#6B7280',
-                        border: '1px solid #D1D5DB',
-                        fontSize: '14px',
-                        fontWeight: 500,
-                      }}
-                    >
-                      Discard Draft
-                    </button>
-                    <button
-                      onClick={handleFinalize}
-                      className="rounded-lg transition-all duration-200"
-                      style={{
-                        padding: '12px 20px',
-                        backgroundColor: '#14B8A6',
-                        color: 'white',
-                        border: 'none',
-                        fontSize: '14px',
-                        fontWeight: 500,
-                      }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.backgroundColor = '#0FB9B1';
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.backgroundColor = '#14B8A6';
-                      }}
-                    >
-                      Finalize Persona
-                    </button>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
           </motion.div>
         )}
 
@@ -2622,21 +2708,42 @@ export default function App() {
                       style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}
                     >
                       <Award size={16} style={{ color: '#14B8A6', marginTop: '2px', flexShrink: 0 }} />
-                      <div className="min-w-0">
+                      <div className="min-w-0 w-full">
                         <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5', marginBottom: item.sourceExperience ? '6px' : 0 }}>
                           {item.highlight}
                         </p>
 
                         {item.sourceExperience && (
                           <div
-                            className="inline-flex items-center rounded-md px-2 py-1"
+                            className="flex items-start gap-2 rounded-md px-2 py-1 w-full max-w-full"
                             style={{
                               backgroundColor: 'rgba(20, 184, 166, 0.10)',
                               border: '1px solid rgba(20, 184, 166, 0.25)',
                             }}
                           >
-                            <span style={{ fontSize: '12px', color: '#0F766E', fontWeight: 600, marginRight: '6px' }}>Source</span>
-                            <span style={{ fontSize: '12px', color: '#0F766E', fontWeight: 500 }} className="truncate">
+                            <span
+                              style={{
+                                fontSize: '12px',
+                                color: '#0F766E',
+                                fontWeight: 600,
+                                flexShrink: 0,
+                                lineHeight: '1.2',
+                                marginTop: '1px',
+                              }}
+                            >
+                              Source
+                            </span>
+                            <span
+                              style={{
+                                fontSize: '12px',
+                                color: '#0F766E',
+                                fontWeight: 500,
+                                lineHeight: '1.2',
+                                overflowWrap: 'anywhere',
+                                wordBreak: 'break-word',
+                              }}
+                              className="min-w-0"
+                            >
                               {item.sourceExperience}
                             </span>
                           </div>
