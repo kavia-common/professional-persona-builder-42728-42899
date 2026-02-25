@@ -775,17 +775,41 @@ export default function App() {
   }, [buildId, state, hasError]);
 
   /**
-   * Prevent render loops from repeated artifact fetches:
-   * - Some backends may return a fresh object identity on each call.
-   * - Even with JSON diff against PersonaData, any subtle normalization differences can cause churn.
+   * Prevent render loops/freezes from repeated artifact fetches and heavy comparisons.
    *
-   * We track a hash of the *raw extracted personaJson* per buildId and skip work if unchanged.
+   * Root issue:
+   * - In React 18 (especially in dev/StrictMode), effects and state updaters can be invoked more than once.
+   * - Updating the "already applied" ref inside a setState updater can be re-played and cause repeated
+   *   expensive coercion/stringify work, which presents as a UI freeze during draft generation.
+   *
+   * Fix:
+   * - Use a non-reentrant "in flight" guard per buildId.
+   * - Update the "already applied" ref OUTSIDE of setState so replays don't re-trigger work.
+   * - Compare a small, stable fingerprint of the *UI-visible* fields rather than JSON.stringify-ing the full object.
    */
   const lastAppliedPersonaArtifactJsonRef = useRef<Record<string, string>>({});
+  const lastAppliedPersonaFingerprintRef = useRef<Record<string, string>>({});
+  const isApplyingArtifactsRef = useRef<Record<string, boolean>>({});
+
+  function fingerprintPersonaData(p: PersonaData): string {
+    // Cheap, stable fingerprint across the fields we actually render.
+    // Avoids JSON.stringify on deep structures (experiences can grow).
+    return [
+      p.name ?? '',
+      p.title ?? '',
+      p.summary ?? '',
+      (p.skills ?? []).join('|'),
+      (p.careerHighlights ?? []).join('|'),
+      String((p.experiences ?? []).length),
+    ].join('::');
+  }
 
   // When we enter draft state, attempt to fetch orchestration artifacts and populate UI persona (best-effort).
   useEffect(() => {
     if (!buildId || state !== 'draft' || hasError) return;
+
+    // Non-reentrant: if we're already applying artifacts for this build, skip.
+    if (isApplyingArtifactsRef.current[buildId]) return;
 
     /**
      * Ignore/unmount guard:
@@ -797,6 +821,8 @@ export default function App() {
     const generationId = generationIdRef.current;
 
     const loadData = async () => {
+      isApplyingArtifactsRef.current[buildId] = true;
+
       try {
         const { getOrchestrationByBuild } = await import('../lib/apiClient');
         const orch = await getOrchestrationByBuild(buildId);
@@ -805,31 +831,36 @@ export default function App() {
         const { personaJson } = extractPersonaJsonFromOrchestrationRecord(orch);
 
         // Only proceed if personaJson is a real object with keys
-        if (personaJson && typeof personaJson === 'object' && Object.keys(personaJson).length > 0) {
-          const artifactJson = safeJsonStringify(personaJson);
+        if (!personaJson || typeof personaJson !== 'object' || Object.keys(personaJson).length === 0) return;
 
-          // Double-gate circuit breaker:
-          // Gate 1: Only consider applying if artifact JSON differs from what we've already applied for this build.
-          // Gate 2: Only commit state (and update the ref) if coercion actually changes UI-visible fields.
-          if (artifactJson !== lastAppliedPersonaArtifactJsonRef.current[buildId]) {
-            setPersonaData((prev) => {
-              const next = coercePersonaDataFromBackendJson(personaJson, prev);
+        const artifactJson = safeJsonStringify(personaJson);
 
-              // Check 1: Did the coercion actually change any visible UI fields?
-              if (JSON.stringify(next) === JSON.stringify(prev)) {
-                return prev;
-              }
+        // Gate 1: if raw artifact JSON is identical to what we've already applied, do nothing.
+        if (artifactJson === lastAppliedPersonaArtifactJsonRef.current[buildId]) return;
 
-              // Check 2: Update the ref ONLY if we are actually committing the change to state.
-              lastAppliedPersonaArtifactJsonRef.current[buildId] = artifactJson;
-              return next;
-            });
-          }
+        // Compute the next persona data once (outside setState) to avoid replay cost.
+        const next = coercePersonaDataFromBackendJson(personaJson, personaData);
+        const nextFingerprint = fingerprintPersonaData(next);
+
+        // Gate 2: if UI-visible fields didn't change, do nothing (but still remember we've seen this artifact).
+        if (nextFingerprint === lastAppliedPersonaFingerprintRef.current[buildId]) {
+          lastAppliedPersonaArtifactJsonRef.current[buildId] = artifactJson;
+          return;
+        }
+
+        // Commit: update refs first (idempotent), then setState once.
+        lastAppliedPersonaArtifactJsonRef.current[buildId] = artifactJson;
+        lastAppliedPersonaFingerprintRef.current[buildId] = nextFingerprint;
+
+        if (!isIgnore && isMountedRef.current) {
+          setPersonaData(next);
         }
       } catch (err) {
         // best-effort only; ignore, but log for diagnostics
         // eslint-disable-next-line no-console
         console.error(`[artifacts][gen:${generationId}] artifact fetch failed`, err);
+      } finally {
+        isApplyingArtifactsRef.current[buildId] = false;
       }
     };
 
@@ -838,7 +869,8 @@ export default function App() {
     return () => {
       isIgnore = true;
     };
-  }, [buildId, state, hasError]);
+    // Include personaData so we coerce from freshest baseline, but guards above prevent loops.
+  }, [buildId, state, hasError, personaData]);
 
   // Load versions whenever personaId becomes available.
   useEffect(() => {
