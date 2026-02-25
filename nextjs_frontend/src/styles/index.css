@@ -13,6 +13,11 @@
 
 /* Project globals */
 @import './fonts.css';
+
+/*
+  Theme must come after Tailwind directives because it uses Tailwind layers
+  (e.g. `@layer base`).
+*/
 @import './theme.css';
 
 /* Optional animation utilities provided by dependency `tw-animate-css`. */
