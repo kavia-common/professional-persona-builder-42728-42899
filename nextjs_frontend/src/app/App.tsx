@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Upload, Loader2, X, Edit3, Plus, CheckCircle2, Camera, Award, Compass } from 'lucide-react';
 import {
@@ -348,13 +348,45 @@ export default function App() {
   const profileImageInputRef = useRef<HTMLInputElement>(null);
   const newSkillInputRef = useRef<HTMLInputElement>(null);
 
+  /**
+   * Guard against re-entrant file-picker triggering.
+   * In some browser/DOM combinations, calling input.click() can synchronously trigger focus/click
+   * side-effects that re-enter handlers, producing an event storm that looks like a “freeze”.
+   */
+  const isOpeningFilePickerRef = useRef(false);
+
+  // PUBLIC_INTERFACE
+  const openFilePicker = useCallback((e?: React.SyntheticEvent) => {
+    /** Opens the hidden primary upload <input type="file"> in a safe, non-reentrant way. */
+    if (e) {
+      // Ensure we don't bubble into any parent handlers (present or future).
+      // Also prevent default to avoid unintended form/button behaviors.
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    // Only allow user-initiated events to open the picker (defensive).
+    const nativeEvent = (e as any)?.nativeEvent as Event | undefined;
+    if (nativeEvent && 'isTrusted' in nativeEvent && !(nativeEvent as any).isTrusted) return;
+
+    // Re-entrancy guard: if we are already opening, bail.
+    if (isOpeningFilePickerRef.current) return;
+    isOpeningFilePickerRef.current = true;
+
+    try {
+      fileInputRef.current?.click();
+    } finally {
+      // Release on next macrotask to avoid same-tick re-entry.
+      setTimeout(() => {
+        isOpeningFilePickerRef.current = false;
+      }, 0);
+    }
+  }, []);
+
   // Helps correlate logs across multiple async flows; increments per draft generation.
   const generationIdRef = useRef<number>(0);
 
-  // NOTE: Do not use click-guard refs or setTimeout-based release logic here.
-  // Those patterns can accidentally create recursive click loops and freeze the browser.
-  // We trigger the native file picker only from the intended element via:
-  // fileInputRef.current?.click()
+  // NOTE: Do not use additional click-guard patterns beyond openFilePicker.
 
   // Track object URLs so we can revoke them (prevents memory leaks and long-term slowdowns/freezes).
   const profileImageObjectUrlRef = useRef<string | null>(null);
@@ -1086,10 +1118,7 @@ export default function App() {
 
                 <button
                   type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    fileInputRef.current?.click();
-                  }}
+                  onClick={openFilePicker}
                   className="inline-flex items-center justify-center rounded-lg transition-all duration-200"
                   style={{
                     backgroundColor: '#14B8A6',
