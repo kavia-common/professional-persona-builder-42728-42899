@@ -239,66 +239,37 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
   /**
    * Attempt to map backend persona JSON into this UI's legacy PersonaData fields.
    *
-   * The backend structure observed in logs is:
-   * - professional_summary: string
-   * - core_competencies: string[]
-   * - career_highlights: Array<{ text: string, source?: string, ... }>
-   * - technical_stack: { tools: string[] }
-   *
-   * We also keep compatibility with the older PersonaDraft fields if present (title, profile.headline),
-   * but the requested stability fix is primarily about mapping the correct fields above.
+   * Authoritative mapping rules (per user_input_ref):
+   * - name: personaJson.profile.headline OR personaJson.name OR fallback.name
+   * - title: personaJson.title OR fallback.title
+   * - summary: personaJson.professional_summary OR personaJson.summary OR fallback.summary
+   * - skills: personaJson.core_competencies OR personaJson.skills (string[])
+   * - careerHighlights: personaJson.career_highlights, handling both:
+   *    - string entries
+   *    - object entries shaped like { text: string }
+   *   Fallback to fallback.careerHighlights when missing/empty.
    */
   // eslint-disable-next-line no-console
   console.log('[persona][coerce] raw personaJson:', personaJson);
 
   try {
-    // These are optional in the backend schema we observed, but keep them as best-effort enhancements.
-    const titleCandidate = personaJson?.title;
-    const title = typeof titleCandidate === 'string' && titleCandidate.trim().length > 0 ? titleCandidate : fallback.title;
-
-    const headlineCandidate = personaJson?.profile?.headline;
-    const nameFromHeadline =
-      typeof headlineCandidate === 'string' && headlineCandidate.trim().length > 0 ? headlineCandidate : fallback.name;
-
-    // REQUIRED mappings per user instructions:
-    // - professional_summary -> summary
-    // - core_competencies -> skills
-    // Also accept PersonaDraft-style fields as fallback (summary/skills).
-    const summaryCandidate = personaJson?.professional_summary ?? personaJson?.summary;
-    const summary =
-      typeof summaryCandidate === 'string' && summaryCandidate.trim().length > 0 ? summaryCandidate : fallback.summary;
-
-    const skillsCandidate = personaJson?.core_competencies ?? personaJson?.skills;
-    const skills = asStringArray(skillsCandidate);
-
-    const highlightsCandidate = personaJson?.career_highlights;
-    const careerHighlights =
-      Array.isArray(highlightsCandidate)
-        ? (highlightsCandidate
-            .map((h) => (h && typeof h === 'object' ? (h as any).text : null))
-            .filter((t) => typeof t === 'string' && t.trim().length > 0) as string[])
-        : [];
-
-    const toolsCandidate = personaJson?.technical_stack?.tools;
-    const tools = asStringArray(toolsCandidate);
-
-    const result: PersonaData = {
+    return {
       ...fallback,
-      // Keep any existing name/title if backend doesn't provide them
-      name: nameFromHeadline,
-      title,
-      summary,
-      skills: skills.length > 0 ? skills : fallback.skills,
-      careerHighlights: careerHighlights.length > 0 ? careerHighlights : fallback.careerHighlights,
-      tools: tools.length > 0 ? tools : fallback.tools,
-    };
 
-    // eslint-disable-next-line no-console
-    console.log('[persona][coerce] result PersonaData:', result);
-    return result;
+      // Map live backend keys to UI state keys
+      name: personaJson?.profile?.headline || personaJson?.name || fallback.name,
+      title: personaJson?.title || fallback.title,
+      summary: personaJson?.professional_summary ?? personaJson?.summary ?? fallback.summary,
+      skills: asStringArray(personaJson?.core_competencies ?? personaJson?.skills),
+
+      // Handle the nested text object in career highlights
+      careerHighlights: Array.isArray(personaJson?.career_highlights)
+        ? (personaJson.career_highlights
+            .map((h: any) => (typeof h === 'object' && h !== null ? h.text : h))
+            .filter((v: any) => typeof v === 'string' && v.trim().length > 0) as string[])
+        : fallback.careerHighlights,
+    };
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn('[persona][coerce] coercion threw; returning fallback. err=', err);
     return fallback;
   }
 }
@@ -831,55 +802,36 @@ export default function App() {
           return;
         }
 
-        // Raw-artifact JSON guard (per build) to avoid repeated coercion/setState when backend returns same payload.
-        const artifactJson = safeJsonStringify(personaJson);
-        const lastJson = lastAppliedPersonaArtifactJsonRef.current[buildId] ?? '';
-        if (artifactJson === lastJson) {
-          // eslint-disable-next-line no-console
-          console.log(
-            `[artifacts][gen:${generationId}] persona artifact unchanged for build; skipping coercion + setPersonaData to avoid loops`,
-            { buildId, sourcePath: extracted.sourcePath }
-          );
-          return;
+        /**
+         * LOOP-KILLER CIRCUIT BREAKER (authoritative behavior from user_input_ref)
+         *
+         * Problem: orchestration fetch may return a new object identity each time (even if same data),
+         * causing repeated setState calls and potential infinite render loops.
+         *
+         * Solution:
+         * 1) Hash the raw artifact via stable JSON stringify and compare to the last applied hash for this buildId.
+         * 2) Inside setPersonaData, compute next and bail out if JSON.stringify(next) === JSON.stringify(prev).
+         * 3) Only after we've decided to apply (i.e., next differs) do we update the last-applied hash ref.
+         */
+        if (personaJson && isNonEmptyObject(personaJson)) {
+          const artifactJson = safeJsonStringify(personaJson);
+
+          // Check if the raw artifact has actually changed before processing
+          if (artifactJson !== lastAppliedPersonaArtifactJsonRef.current[buildId]) {
+            setPersonaData((prev) => {
+              const next = coercePersonaDataFromBackendJson(personaJson, prev);
+
+              // DEEP COMPARISON: Only update state if the resulting object is actually different
+              if (JSON.stringify(next) === JSON.stringify(prev)) {
+                return prev;
+              }
+
+              // Update the ref to track that we've processed this specific version
+              lastAppliedPersonaArtifactJsonRef.current[buildId] = artifactJson;
+              return next;
+            });
+          }
         }
-        lastAppliedPersonaArtifactJsonRef.current[buildId] = artifactJson;
-
-        // eslint-disable-next-line no-console
-        console.log(`[artifacts][gen:${generationId}] personaJson extracted (pre-coerce):`, personaJson);
-
-        setPersonaData((prev) => {
-          /**
-           * Render-loop freeze fix:
-           * Only update state if the computed PersonaData is meaningfully different.
-           * A deep-equality guard prevents re-renders from object identity churn.
-           */
-          const coerced = coercePersonaDataFromBackendJson(personaJson, prev);
-
-          // Deep equality guard (per user_input_ref) to prevent infinite render loops.
-          // Only apply the state update if the actual JSON content changed.
-          if (JSON.stringify(coerced) === JSON.stringify(prev)) {
-            // eslint-disable-next-line no-console
-            console.log(
-              `[artifacts][gen:${generationId}] personaData is deep-equal to previous state; skipping update to prevent render loop.`
-            );
-            return prev;
-          }
-
-          // eslint-disable-next-line no-console
-          console.log(`[artifacts][gen:${generationId}] Coerced personaData for update:`);
-          // Per user request, log the coerced data in a structured table for verification.
-          try {
-            // eslint-disable-next-line no-console
-            console.table(coerced);
-          } catch (e) {
-            // eslint-disable-next-line no-console
-            console.log('[debug] console.table failed, logging object instead', coerced);
-          }
-
-          // eslint-disable-next-line no-console
-          console.log(`[artifacts][gen:${generationId}] personaData updated from backend artifacts (JSON diff changed)`);
-          return coerced;
-        });
       } catch (err) {
         // best-effort only; ignore, but log for diagnostics
         // eslint-disable-next-line no-console
