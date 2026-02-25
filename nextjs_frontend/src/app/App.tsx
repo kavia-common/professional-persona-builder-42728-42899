@@ -1992,8 +1992,14 @@ export default function App() {
               &#x2190; Go Back
             </button>
             <h2
-              onMouseEnter={() => setIsHoveringHeading(true)}
-              onMouseLeave={() => setIsHoveringHeading(false)}
+              onMouseEnter={(e) => {
+                setIsHoveringHeading(true);
+                e.currentTarget.style.filter = 'drop-shadow(0 0 8px rgba(20, 184, 166, 0.4))';
+              }}
+              onMouseLeave={(e) => {
+                setIsHoveringHeading(false);
+                e.currentTarget.style.filter = 'none';
+              }}
               className=\"relative inline-block cursor-default mx-auto\"
               style={{
                 fontSize: '32px',
@@ -2003,12 +2009,6 @@ export default function App() {
                 textAlign: 'center',
                 display: 'block',
                 transition: 'filter 0.3s ease',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.filter = 'drop-shadow(0 0 8px rgba(20, 184, 166, 0.4))';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.filter = 'none';
               }}
             >
               Finalized Persona
