@@ -4,12 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Upload, Loader2, X, Edit3, Plus, CheckCircle2, Camera, Award, Compass } from 'lucide-react';
 import {
+  generateDraftForBuild,
   getBuildStatus,
-  listPersonaVersions,
   orchestrationRunAll,
   updatePersona,
   type BuildStatus,
-  type PersonaVersion,
   type UUID,
 } from '../lib/apiClient';
 
@@ -28,13 +27,29 @@ interface Experience {
   description: string;
 }
 
+interface CareerHighlight {
+  highlight: string;
+  /**
+   * Optional “where this came from” string shown under the highlight.
+   * Examples: “Senior Product Manager, Acme (2021–2024)”, “Resume”, “Performance Review”, etc.
+   */
+  sourceExperience?: string;
+}
+
 /**
  * UI Persona shape (legacy from the integrated template).
  * Backend persona JSON is currently represented/stored as arbitrary JSON and/or as a strict PersonaDraft.
- * We keep this UI model but now populate it from backend draft/final JSON when available.
+ *
+ * NOTE:
+ * - We intentionally keep `name` in the data model because it may exist in backend payloads,
+ *   but per user request we DO NOT display user name under the "Career Navigator" headline.
  */
 interface PersonaData {
   name: string;
+  /**
+   * For our UI, `title` is treated as the user's role/designation.
+   * It is derived from documents/persona payloads (e.g., profile.headline) when possible.
+   */
   title: string;
   summary: string;
   skills: string[];
@@ -44,7 +59,13 @@ interface PersonaData {
   tools: string[];
   industries: string[];
   yearsOfExperience: string;
-  careerHighlights: string[];
+
+  /**
+   * Career highlights enriched with optional “source experience”.
+   * NOTE: backend drafts may still return string arrays; we map them into objects.
+   */
+  careerHighlights: CareerHighlight[];
+
   profileImage?: string;
 }
 
@@ -58,32 +79,12 @@ function asStringArray(value: unknown): string[] {
   return value.filter((v) => typeof v === 'string' && v.trim().length > 0) as string[];
 }
 
-function safeJsonStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function getErrorMessage(err: unknown): string {
-  if (!err) return 'Unknown error';
-  if (err instanceof Error) return err.message;
-  if (typeof err === 'string') return err;
-  try {
-    return JSON.stringify(err);
-  } catch {
-    return String(err);
-  }
-}
-
 function isNonEmptyObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && Object.keys(value as any).length > 0;
 }
 
 /**
- * Returns initials for a display label (e.g., user name) to be shown in avatar chips.
- * Keeps behavior consistent between different avatar locations.
+ * Returns initials for a display label to be shown in avatar chips.
  */
 function getInitials(label: string): string {
   const base = label.trim();
@@ -96,10 +97,7 @@ function getInitials(label: string): string {
   return initials || '•';
 }
 
-function getNestedOrchestrationValue(
-  root: any,
-  path: Array<string | number>
-): { value: any; foundPath: string } | null {
+function getNestedOrchestrationValue(root: any, path: Array<string | number>): { value: any; foundPath: string } | null {
   /**
    * Safe nested accessor that returns both the value and the dot-path used.
    * This supports debugging cases where orchestration responses evolve shape.
@@ -149,18 +147,26 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
    * 2) Fall back to the first non-null candidate only if no persona-shaped object exists
    *    (and log that scenario for debugging).
    *
-   * Authoritative candidate priority (per user_input_ref):
+   * Authoritative candidate priority:
    * - artifacts.draftPersona is often where live backend persona data resides.
    */
   const candidates: Array<Array<string>> = [
-    // TOP PRIORITY (authoritative): live persona draft often stored here
+    // Draft variants
     ['artifacts', 'draftPersona'],
+    ['artifacts', 'draftPersona', 'persona'],
+    ['artifacts', 'draftPersona', 'draft'],
+    ['artifacts', 'draftPersona', 'personaJson'],
+
+    // Final variants
+    ['artifacts', 'finalPersona'],
+    ['artifacts', 'finalPersona', 'final'],
+    ['artifacts', 'finalPersona', 'persona'],
+    ['artifacts', 'finalPersona', 'personaJson'],
 
     // Other artifact envelopes
     ['artifacts', 'output'],
     ['artifacts', 'result'],
     ['artifacts', 'output', 'personaJson'],
-    ['artifacts', 'finalPersona'],
 
     // Legacy/alternate locations
     ['artifacts', 'personaJson'],
@@ -168,21 +174,43 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
     ['artifacts', 'draft', 'personaJson'],
     ['artifacts', 'final'],
     ['artifacts', 'draft'],
-    ['finalPersona'],
-    ['final'],
+
+    // Some scaffold/placeholder implementations store persona at top-level.
     ['draftPersona'],
+    ['draftPersona', 'persona'],
+    ['draftPersona', 'draft'],
+    ['draftPersona', 'personaJson'],
+    ['personaDraft'],
+    ['personaDraft', 'persona'],
+    ['personaDraft', 'draft'],
+    ['personaDraft', 'personaJson'],
     ['draft'],
-
-    // Fallback (authoritative): may contain full persona, but can also be non-persona (personaId-only) in some shapes
-    ['results', 'generate', 'persona'],
-
-    // Other legacy fallbacks
-    ['results', 'finalize', 'final'],
+    ['draft', 'persona'],
+    ['draft', 'personaJson'],
     ['persona'],
+    ['persona', 'personaJson'],
+
+    // Final variants at top-level (defensive)
+    ['finalPersona'],
+    ['finalPersona', 'final'],
+    ['finalPersona', 'persona'],
+    ['finalPersona', 'personaJson'],
+    ['final'],
+    ['final', 'personaJson'],
+
+    // Orchestration run-all response "results" (some versions embed the persona here)
+    ['results', 'generate', 'persona'],
+    ['results', 'generate', 'draftPersona'],
+    ['results', 'generate', 'personaDraft'],
+    ['results', 'finalize', 'final'],
   ];
 
   const looksLikePersona = (value: any): boolean => {
     if (!isNonEmptyObject(value)) return false;
+
+    // Reject common non-persona envelopes early.
+    const keys = Object.keys(value);
+    if (keys.length === 1 && (value as any).personaId) return false;
 
     // Observed “current state persona” format
     if (
@@ -194,17 +222,14 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
       return true;
     }
 
-    // Backend PersonaDraft shape (from OpenAPI)
-    if (
-      typeof (value as any).title === 'string' ||
-      typeof (value as any).summary === 'string' ||
-      Array.isArray((value as any).skills) ||
-      isNonEmptyObject((value as any).profile)
-    ) {
-      return true;
-    }
+    // Backend PersonaDraft shape: require at least one meaningful field.
+    const hasTitle = typeof (value as any).title === 'string' && (value as any).title.trim().length > 0;
+    const hasSummary = typeof (value as any).summary === 'string' && (value as any).summary.trim().length > 0;
+    const hasSkills = Array.isArray((value as any).skills) && (value as any).skills.length > 0;
+    const hasProfileHeadline =
+      typeof (value as any)?.profile?.headline === 'string' && (value as any).profile.headline.trim().length > 0;
 
-    return false;
+    return hasTitle || hasSummary || hasSkills || hasProfileHeadline;
   };
 
   let firstNonNull: { personaJson: any; sourcePath: string } | null = null;
@@ -213,7 +238,6 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
     const hit = getNestedOrchestrationValue(orch, path);
     if (hit?.value === undefined || hit?.value === null) continue;
 
-    // Keep the first non-null in case nothing persona-shaped exists.
     if (!firstNonNull) firstNonNull = { personaJson: hit.value, sourcePath: hit.foundPath };
 
     if (looksLikePersona(hit.value)) {
@@ -245,67 +269,111 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
   /**
    * Attempt to map backend persona JSON into this UI's legacy PersonaData fields.
    *
-   * Authoritative mapping rules (per user_input_ref):
-   * - name: personaJson.profile.headline OR personaJson.name OR fallback.name
-   * - title: personaJson.title OR fallback.title
-   * - summary: personaJson.professional_summary OR personaJson.summary OR fallback.summary
-   * - skills: personaJson.core_competencies OR personaJson.skills (string[])
-   * - careerHighlights: personaJson.career_highlights, handling both:
-   *    - string entries
-   *    - object entries shaped like { text: string }
-   *   Fallback to fallback.careerHighlights when missing/empty.
+   * We support TWO common backend shapes:
+   * 1) “Legacy/current state” persona JSON keys:
+   *    - professional_summary (string)
+   *    - core_competencies (string[])
+   *    - career_highlights (string[] | {text:string, source_experience?: string}[])
+   *
+   * 2) OpenAPI PersonaDraft shape:
+   *    - title (string)
+   *    - summary (string)
+   *    - profile.headline (string)  -> best candidate for role/designation
+   *    - skills (string[])
+   *    - experienceHighlights (string[])
+   *
+   * UI bindings:
+   * - personaData.title is displayed as the role/designation line (header + persona sections).
+   * - personaData.name may exist but is not shown under app headline per requirements.
    */
   // eslint-disable-next-line no-console
   console.log('[persona][coerce] raw personaJson:', personaJson);
 
   try {
+    const coercedSkills = asStringArray(personaJson?.core_competencies ?? personaJson?.skills);
+
+    const coerceHighlights = (value: unknown): CareerHighlight[] => {
+      if (!Array.isArray(value)) return [];
+
+      return (value as any[])
+        .map((h) => {
+          if (typeof h === 'string') {
+            const highlight = h.trim();
+            return highlight ? ({ highlight } satisfies CareerHighlight) : null;
+          }
+
+          if (typeof h === 'object' && h !== null) {
+            const highlightRaw = (h as any).highlight ?? (h as any).text ?? (h as any).value ?? (h as any).career_highlight;
+            const sourceRaw =
+              (h as any).sourceExperience ??
+              (h as any).source_experience ??
+              (h as any).source ??
+              (h as any).experience ??
+              (h as any).role ??
+              null;
+
+            const highlight = typeof highlightRaw === 'string' ? highlightRaw.trim() : '';
+            const sourceExperience = typeof sourceRaw === 'string' ? sourceRaw.trim() : undefined;
+
+            if (!highlight) return null;
+
+            return {
+              highlight,
+              sourceExperience: sourceExperience && sourceExperience.length > 0 ? sourceExperience : undefined,
+            } satisfies CareerHighlight;
+          }
+
+          return null;
+        })
+        .filter(Boolean) as CareerHighlight[];
+    };
+
+    const coercedHighlights =
+      coerceHighlights(personaJson?.career_highlights).length > 0
+        ? coerceHighlights(personaJson?.career_highlights)
+        : coerceHighlights(personaJson?.experienceHighlights);
+
+    /**
+     * Role/designation derivation:
+     * - Prefer profile.headline (PersonaDraft).
+     * - Then common role/headline fields.
+     * - Finally fall back to existing UI fallback title.
+     */
+    const derivedTitle =
+      personaJson?.profile?.headline ??
+      personaJson?.role ??
+      personaJson?.headline ??
+      personaJson?.current_role ??
+      personaJson?.currentRole ??
+      personaJson?.title ?? // sometimes "title" is used as role; we accept as fallback
+      fallback.title;
+
+    const derivedName =
+      personaJson?.name ??
+      personaJson?.full_name ??
+      personaJson?.fullName ??
+      personaJson?.user_name ??
+      personaJson?.userName ??
+      fallback.name;
+
     const next: PersonaData = {
       ...fallback,
-
-      // Map live backend keys to UI state keys
-      name: personaJson?.profile?.headline || personaJson?.name || fallback.name,
-      title: personaJson?.title || fallback.title,
+      name: typeof derivedName === 'string' ? derivedName : fallback.name,
+      title: typeof derivedTitle === 'string' ? derivedTitle : fallback.title,
       summary: personaJson?.professional_summary ?? personaJson?.summary ?? fallback.summary,
-      skills: asStringArray(personaJson?.core_competencies ?? personaJson?.skills),
-
-      // Handle array of strings OR array of objects { text: string } for highlights
-      careerHighlights: Array.isArray(personaJson?.career_highlights)
-        ? (personaJson.career_highlights
-            .map((h: any) => (typeof h === 'object' && h !== null ? h.text : h))
-            .filter((v: any) => typeof v === 'string' && v.trim().length > 0) as string[])
-        : fallback.careerHighlights,
+      skills: coercedSkills.length > 0 ? coercedSkills : fallback.skills,
+      careerHighlights: coercedHighlights.length > 0 ? coercedHighlights : fallback.careerHighlights,
     };
 
     return next;
-  } catch (err) {
+  } catch {
     return fallback;
   }
 }
 
 export default function App() {
   /**
-   * Render-loop diagnostics:
-   * - we keep a simple render counter and timestamp window
-   * - if renders spike, log an actionable snapshot (state/buildId/personaId)
-   *
-   * This is intentionally low-overhead (no setState) and only logs to console.
-   */
-  const renderDiagRef = useRef<{ count: number; windowStartMs: number }>({
-    count: 0,
-    windowStartMs: Date.now(),
-  });
-
-  renderDiagRef.current.count += 1;
-  const nowMs = Date.now();
-  const windowMs = 1500;
-  if (nowMs - renderDiagRef.current.windowStartMs > windowMs) {
-    renderDiagRef.current.count = 1;
-    renderDiagRef.current.windowStartMs = nowMs;
-  }
-
-  /**
    * Mount guard: used to prevent setState after unmount and to stabilize any auto-trigger logic.
-   * This also helps prevent runaway render loops caused by async flows updating state after teardown.
    */
   const isMountedRef = useRef(false);
   useEffect(() => {
@@ -317,8 +385,7 @@ export default function App() {
 
   /**
    * Error guard:
-   * When backend failures happen, we set hasError and stop any further background loops
-   * (e.g. polling) instead of resetting app state back to "initial"/restarting flows.
+   * When backend failures happen, we set hasError and stop any further background loops.
    */
   const [hasError, setHasError] = useState(false);
 
@@ -331,18 +398,13 @@ export default function App() {
   const [buildId, setBuildId] = useState<UUID | null>(null);
   const [personaId, setPersonaId] = useState<UUID | null>(null);
   const [buildStatus, setBuildStatus] = useState<BuildStatus | null>(null);
-  const [isPolling, setIsPolling] = useState(false);
-
-  // Version history state
-  const [versions, setVersions] = useState<PersonaVersion[]>([]);
-  const [versionsError, setVersionsError] = useState<string>('');
-  const [isLoadingVersions, setIsLoadingVersions] = useState(false);
 
   const [isEditable, setIsEditable] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isAddingSkill, setIsAddingSkill] = useState(false);
   const [newSkillValue, setNewSkillValue] = useState('');
   const [showSaveSuccess, setShowSaveSuccess] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const additionalFileInputRef = useRef<HTMLInputElement>(null);
   const profileImageInputRef = useRef<HTMLInputElement>(null);
@@ -350,42 +412,85 @@ export default function App() {
 
   /**
    * Guard against re-entrant file-picker triggering.
-   * In some browser/DOM combinations, calling input.click() can synchronously trigger focus/click
-   * side-effects that re-enter handlers, producing an event storm that looks like a “freeze”.
-   *
-   * Important: we use ONE guard for all hidden file inputs so multiple buttons can't race.
    */
   const isOpeningFilePickerRef = useRef(false);
+
+  /**
+   * Chrome freeze mitigation (dialog open + close).
+   */
+  const fileDialogActiveRef = useRef(false);
+  const fileDialogCooldownUntilRef = useRef<number>(0);
+  const FILE_DIALOG_COOLDOWN_MS = 650;
+
+  /**
+   * React state mirror of dialog activity so we can disable motion/hover via render-time conditionals.
+   */
+  const [isFileDialogActive, setIsFileDialogActive] = useState(false);
+
+  const markFileDialogActive = useCallback(() => {
+    fileDialogActiveRef.current = true;
+    if (isMountedRef.current) setIsFileDialogActive(true);
+  }, []);
+
+  const markFileDialogInactive = useCallback(() => {
+    fileDialogActiveRef.current = false;
+    fileDialogCooldownUntilRef.current = Date.now() + FILE_DIALOG_COOLDOWN_MS;
+    if (isMountedRef.current) setIsFileDialogActive(false);
+  }, []);
+
+  useEffect(() => {
+    const onWindowFocus = () => {
+      if (!fileDialogActiveRef.current) return;
+      markFileDialogInactive();
+    };
+
+    window.addEventListener('focus', onWindowFocus);
+    return () => {
+      window.removeEventListener('focus', onWindowFocus);
+    };
+  }, [markFileDialogInactive]);
+
+  const shouldAllowHoverEffects = useCallback((): boolean => {
+    if (fileDialogActiveRef.current) return false;
+    if (Date.now() < fileDialogCooldownUntilRef.current) return false;
+    return true;
+  }, []);
 
   const openHiddenFileInput = useCallback(
     (inputRef: React.RefObject<HTMLInputElement>, e?: React.SyntheticEvent) => {
       /**
        * Opens a hidden <input type="file"> in a safe, non-reentrant way.
-       * This is shared across all file pickers (primary upload, add-more, profile image).
        */
       if (e) {
         e.preventDefault();
         e.stopPropagation();
       }
 
-      // Only allow user-initiated events to open the picker (defensive).
       const nativeEvent = (e as any)?.nativeEvent as Event | undefined;
       if (nativeEvent && 'isTrusted' in nativeEvent && !(nativeEvent as any).isTrusted) return;
 
-      // If we're already processing a click, ignore all subsequent ones for 1 full second
       if (isOpeningFilePickerRef.current) return;
       isOpeningFilePickerRef.current = true;
 
+      markFileDialogActive();
+
       try {
-        inputRef.current?.click();
+        setTimeout(() => {
+          inputRef.current?.click();
+        }, 0);
       } finally {
-        // Increase lockout to 1000ms to allow the OS file dialog to "take over"
         setTimeout(() => {
           isOpeningFilePickerRef.current = false;
         }, 1000);
+
+        setTimeout(() => {
+          if (fileDialogActiveRef.current) {
+            markFileDialogInactive();
+          }
+        }, 4000);
       }
     },
-    []
+    [markFileDialogActive, markFileDialogInactive]
   );
 
   // PUBLIC_INTERFACE
@@ -400,23 +505,11 @@ export default function App() {
   // Helps correlate logs across multiple async flows; increments per draft generation.
   const generationIdRef = useRef<number>(0);
 
-  // NOTE: Do not use additional click-guard patterns beyond openFilePicker.
-
   // Track object URLs so we can revoke them (prevents memory leaks and long-term slowdowns/freezes).
   const profileImageObjectUrlRef = useRef<string | null>(null);
 
   const initialPersonaFallback = useMemo<PersonaData>(
     () => ({
-      /**
-       * IMPORTANT:
-       * Previously this UI used a hardcoded demo persona ("Sarah Johnson").
-       * We now keep ONLY an empty/safe fallback so all persona/profile fields are driven by:
-       * - orchestration draft (generated) and/or
-       * - orchestration final (when finalized)
-       * - saved persona/version history (already wired via personaId + /versions)
-       *
-       * This fallback exists only to avoid undefined checks before the first successful orchestration run.
-       */
       name: '',
       title: '',
       summary: '',
@@ -432,65 +525,31 @@ export default function App() {
     []
   );
 
-  /**
-   * personaData must be stable. Initialize with a stable fallback from useMemo.
-   * This avoids a null state and an extra effect for initialization, reducing re-renders.
-   */
   const [personaData, setPersonaData] = useState<PersonaData>(initialPersonaFallback);
 
-  // Memoize commonly accessed persona fields to keep effect deps primitive & stable.
+  // Requested: we do not display user name under the app headline; role/designation is required.
   const personaName = personaData?.name ?? '';
   const personaTitle = personaData?.title ?? '';
   const personaSummary = personaData?.summary ?? '';
-
-  // Requested: top-of-component render log (helps diagnose loops + data churn)
-  // Throttle so it doesn't spam the console and appear like an infinite loop.
-  const lastRenderLogAtRef = useRef<number>(0);
-  if (nowMs - lastRenderLogAtRef.current > 1200) {
-    lastRenderLogAtRef.current = nowMs;
-    // eslint-disable-next-line no-console
-    console.log('Rendering with data:', personaData);
-  }
-
-  // Render-loop diagnostics logging (after primitives exist).
-  if (renderDiagRef.current.count >= 30) {
-    // eslint-disable-next-line no-console
-    console.warn('[render-loop][suspected] high render rate', {
-      rendersWithinWindow: renderDiagRef.current.count,
-      windowMs,
-      state,
-      buildId,
-      personaId,
-      isPolling,
-      hasError,
-      personaNameLen: personaName.length,
-      personaTitleLen: personaTitle.length,
-      personaSummaryLen: personaSummary.length,
-    });
-  }
 
   const ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.txt'];
   const MAX_FILES = 5;
 
   const validateFile = (file: File): boolean => {
     const fileName = file.name.toLowerCase();
-    const isValid = ALLOWED_EXTENSIONS.some((ext) => fileName.endsWith(ext));
-    return isValid;
+    return ALLOWED_EXTENSIONS.some((ext) => fileName.endsWith(ext));
   };
 
   const addFiles = (files: File[]) => {
-    // Avoid calling setState from inside other state updaters (can create confusing re-entrancy patterns).
     setUploadError('');
     setBackendError('');
 
-    // Validate all files first (cheap) before touching state
     const invalidFiles = files.filter((file) => !validateFile(file));
     if (invalidFiles.length > 0) {
       setUploadError('Unsupported file format. Please upload PDF, DOCX, or TXT.');
       return;
     }
 
-    // Precompute based on current state to avoid side effects inside updater function.
     const currentCount = uploadedFiles.length;
     if (currentCount + files.length > MAX_FILES) {
       setUploadError(`Maximum ${MAX_FILES} documents allowed.`);
@@ -506,17 +565,18 @@ export default function App() {
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    // Prevent bubbling into any parent click handlers (and avoid any chance of recursive click loops/freezes).
     e.stopPropagation();
+
+    if (fileDialogActiveRef.current) {
+      fileDialogActiveRef.current = false;
+      fileDialogCooldownUntilRef.current = Date.now() + FILE_DIALOG_COOLDOWN_MS;
+      setIsFileDialogActive(false);
+    }
 
     if (!e.target.files) return;
 
     const newFiles = Array.from(e.target.files);
-
-    // Important: reset the input so selecting the same file again still fires onChange.
-    // This avoids users repeatedly clicking/dragging thinking nothing happened.
     e.target.value = '';
-
     addFiles(newFiles);
   };
 
@@ -540,8 +600,7 @@ export default function App() {
   const handleGenerateDraft = async () => {
     const generationId = ++generationIdRef.current;
 
-    // Reset the circuit-breaker memory so a retry/new upload can't be blocked by an old build's artifact fingerprint.
-    // (Authoritative instruction from user_input_ref)
+    // Reset artifact circuit-breakers so new uploads can apply new artifacts.
     lastAppliedPersonaArtifactFingerprintRef.current = {};
     lastAppliedPersonaUiFingerprintRef.current = {};
 
@@ -554,16 +613,12 @@ export default function App() {
       existingPersonaId: personaId,
     });
 
-    // Clear prior error guard on explicit user action.
     setHasError(false);
 
     setBackendError('');
-    setVersionsError('');
-    setVersions([]);
     setIsEditable(false);
     setHasUnsavedChanges(false);
 
-    // Start backend-driven orchestration, then poll /builds/{id}/status for progress.
     try {
       setState('processing');
 
@@ -586,7 +641,6 @@ export default function App() {
 
       const runAllRequest = {
         mode: 'persona_build' as const,
-        // Leave userId null for now; backend supports null userId in scaffold.
         useLatestCategoryDocs: true,
         autoCreatePersona: true,
         generate: {
@@ -595,13 +649,11 @@ export default function App() {
         },
       };
 
-      // Requested explicit logging for the orchestration call.
       // eslint-disable-next-line no-console
       console.log(`[orchestrationRunAll][gen:${generationId}] request:`, runAllRequest);
 
       const runAll = await orchestrationRunAll(runAllRequest);
 
-      // Requested explicit logging for the orchestration response.
       // eslint-disable-next-line no-console
       console.log(`[orchestrationRunAll][gen:${generationId}] response:`, runAll);
 
@@ -616,23 +668,12 @@ export default function App() {
         updatedAt: runAll.build.updatedAt,
       });
 
-      // If the backend already produced persona artifacts immediately, we can enter draft state.
-      // Otherwise we keep "processing" and let polling transition us.
       if (runAll.build.status === 'succeeded') {
-        // eslint-disable-next-line no-console
-        console.log(`[draft][gen:${generationId}] build already succeeded; entering draft state`);
         setState('draft');
       } else {
-        // eslint-disable-next-line no-console
-        console.log(`[draft][gen:${generationId}] build not yet succeeded; remain processing`, {
-          status: runAll.build.status,
-          progress: runAll.build.progress,
-          currentStep: runAll.build.currentStep,
-        });
         setState('processing');
       }
     } catch (e: any) {
-      // Surface backend errors in UI (including payload details) instead of silently resetting.
       const payloadMsg =
         e?.payload && typeof e.payload === 'object' && e.payload !== null ? e.payload?.message || e.payload?.error : null;
 
@@ -642,19 +683,19 @@ export default function App() {
 
       setBackendError(message);
       setHasError(true);
-
-      // Keep user in processing view so they can see the error banner in the left column.
       setState('processing');
     }
   };
 
   const handleSaveChanges = async () => {
-    // Persist edited persona JSON as a new version in backend (if persona exists).
-    // In scaffold mode without DB, backend may return 503; we surface the error.
+    /**
+     * Keep save behavior working, but we intentionally do NOT display any versions/history UI.
+     * Backend may still version internally; that's fine.
+     */
     try {
       setBackendError('');
+
       if (!personaId) {
-        // If no personaId is available, we still show local "saved" behavior.
         setHasUnsavedChanges(false);
         setShowSaveSuccess(true);
         setTimeout(() => setShowSaveSuccess(false), 3000);
@@ -669,16 +710,12 @@ export default function App() {
       await updatePersona({
         personaId,
         title: personaData.title,
-        // Store the whole UI persona as personaJson for now.
         personaJson: personaData as any,
       });
 
       setHasUnsavedChanges(false);
       setShowSaveSuccess(true);
       setTimeout(() => setShowSaveSuccess(false), 3000);
-
-      // Refresh versions list after save
-      await refreshVersions(personaId);
     } catch (e: any) {
       setBackendError(e?.message || 'Failed to save changes to backend.');
     }
@@ -689,23 +726,59 @@ export default function App() {
     setIsEditable(false);
   };
 
-  async function refreshVersions(id: UUID) {
-    setIsLoadingVersions(true);
-    setVersionsError('');
-    try {
-      const resp = await listPersonaVersions(id);
-      // eslint-disable-next-line no-console
-      console.log('[versions] listPersonaVersions raw response:', resp);
-      const sorted = [...resp.versions].sort((a, b) => b.version - a.version);
-      setVersions(sorted);
-    } catch (e: any) {
-      // eslint-disable-next-line no-console
-      console.error('[versions] listPersonaVersions failed:', e);
-      setVersionsError(e?.message || 'Failed to load version history.');
-    } finally {
-      setIsLoadingVersions(false);
+  // PUBLIC_INTERFACE
+  const handleRegenerateDraft = useCallback(async () => {
+    /**
+     * Re-generates the draft persona for the current build.
+     *
+     * Note: no history/version UI is tracked in the frontend anymore.
+     */
+    if (!buildId) {
+      setBackendError('No build available to regenerate. Please generate a draft persona first.');
+      return;
     }
-  }
+
+    const generationId = ++generationIdRef.current;
+
+    lastAppliedPersonaArtifactFingerprintRef.current = {};
+    lastAppliedPersonaUiFingerprintRef.current = {};
+
+    setHasError(false);
+    setBackendError('');
+    setIsEditable(false);
+    setHasUnsavedChanges(false);
+
+    try {
+      setState('processing');
+
+      const resp = await generateDraftForBuild({
+        buildId,
+        personaId: personaId ?? undefined,
+        saveDraft: true,
+        createVersion: true,
+      });
+
+      // eslint-disable-next-line no-console
+      console.log(`[draft][regen:${generationId}] generateDraftForBuild response:`, resp);
+
+      setPersonaId(resp.personaId ?? null);
+
+      if (buildStatus?.status === 'succeeded') {
+        setState('draft');
+      }
+    } catch (e: any) {
+      const payloadMsg =
+        e?.payload && typeof e.payload === 'object' && e.payload !== null ? e.payload?.message || e.payload?.error : null;
+
+      const message = payloadMsg || e?.message || 'Failed to regenerate the draft persona.';
+      // eslint-disable-next-line no-console
+      console.error(`[draft][regen:${generationId}] regenerate failed`, { message, error: e });
+
+      setBackendError(message);
+      setHasError(true);
+      setState('processing');
+    }
+  }, [buildId, personaId, buildStatus?.status]);
 
   // Poll build progress while processing
   useEffect(() => {
@@ -715,11 +788,6 @@ export default function App() {
 
     const generationId = generationIdRef.current;
     let cancelled = false;
-
-    if (isMountedRef.current) setIsPolling(true);
-
-    // eslint-disable-next-line no-console
-    console.log(`[poll][gen:${generationId}] starting polling`, { buildId, state });
 
     const interval = setInterval(async () => {
       try {
@@ -732,20 +800,13 @@ export default function App() {
         setBuildStatus(status);
 
         if (status.status === 'succeeded') {
-          // eslint-disable-next-line no-console
-          console.log(`[poll][gen:${generationId}] build succeeded; transitioning state -> draft`, status);
           setState('draft');
         } else if (status.status === 'failed' || status.status === 'cancelled') {
-          // IMPORTANT: do not fail silently; log message
           // eslint-disable-next-line no-console
           console.error(`[poll][gen:${generationId}] build ${status.status}; message=`, status.message, 'full status=', status);
           setBackendError(status.message || `Build ${status.status}.`);
           setHasError(true);
-
-          // Keep the processing screen visible so the user sees the backend error banner.
           setState('processing');
-        } else {
-          // queued/running: stay in processing
         }
       } catch (e: any) {
         if (cancelled || !isMountedRef.current) return;
@@ -759,39 +820,23 @@ export default function App() {
 
         setBackendError(message);
         setHasError(true);
-
-        // Keep the processing screen visible so the user sees the backend error banner.
         setState('processing');
       }
-    }, 2000); // Polling interval intentionally 2000ms (reduced churn vs 800ms; per stability instructions)
+    }, 2000);
 
     return () => {
       cancelled = true;
-      if (isMountedRef.current) setIsPolling(false);
       clearInterval(interval);
-      // eslint-disable-next-line no-console
-      console.log(`[poll][gen:${generationId}] stopped polling (cleanup)`, { buildId });
     };
-    // IMPORTANT: keep dependencies primitive to avoid object-identity loops.
   }, [buildId, state, hasError]);
 
   /**
    * Prevent render loops/freezes from repeated artifact fetches and heavy comparisons.
-   *
-   * Failure mode:
-   * - Effect ran with dependency on `personaData`, and then called `setPersonaData(...)`.
-   * - That re-render changed `personaData`, which re-fired the effect, which fetched again...
-   * - Combined with "deep compare" work (stringify / coercion), this can look like the UI freezes.
-   *
-   * Fix approach (minimal + safe):
-   * - Non-re-entrant "in-flight" guard per buildId (prevents concurrent applies).
-   * - Idempotent: track a lightweight *raw artifact fingerprint* (no JSON.stringify loops).
-   * - Only call setPersonaData when a small UI fingerprint changes.
-   * - Do NOT depend on `personaData` in the effect; use a ref snapshot for the baseline.
    */
   const lastAppliedPersonaArtifactFingerprintRef = useRef<Record<string, string>>({});
   const lastAppliedPersonaUiFingerprintRef = useRef<Record<string, string>>({});
   const isApplyingArtifactsRef = useRef<Record<string, boolean>>({});
+  const lastAppliedPersonaSourcePathRef = useRef<Record<string, string>>({});
 
   const personaDataRef = useRef<PersonaData>(initialPersonaFallback);
   useEffect(() => {
@@ -799,44 +844,30 @@ export default function App() {
   }, [personaData]);
 
   function fingerprintPersonaData(p: PersonaData): string {
-    // Cheap, stable fingerprint across the fields we actually render.
-    // Avoid JSON.stringify on deep structures (experiences can grow).
     return [
       p.name ?? '',
       p.title ?? '',
       p.summary ?? '',
       (p.skills ?? []).join('|'),
-      (p.careerHighlights ?? []).join('|'),
+      (p.careerHighlights ?? []).map((h) => `${h.highlight ?? ''}@@${h.sourceExperience ?? ''}`).join('|'),
       String((p.experiences ?? []).length),
     ].join('::');
   }
 
   function fingerprintPersonaArtifact(personaJson: any): string {
-    /**
-     * A small, stable fingerprint for the raw backend artifact.
-     * This intentionally ignores large text fields and deep structures to avoid CPU spikes.
-     * It's good enough to prevent re-applying the same payload repeatedly.
-     */
     if (!isNonEmptyObject(personaJson)) return 'empty';
-    const profileHeadline =
-      typeof (personaJson as any)?.profile?.headline === 'string' ? (personaJson as any).profile.headline : '';
+    const profileHeadline = typeof (personaJson as any)?.profile?.headline === 'string' ? (personaJson as any).profile.headline : '';
     const title = typeof (personaJson as any)?.title === 'string' ? (personaJson as any).title : '';
     const summary = typeof (personaJson as any)?.summary === 'string' ? (personaJson as any).summary : '';
     const professionalSummary =
       typeof (personaJson as any)?.professional_summary === 'string' ? (personaJson as any).professional_summary : '';
 
     const skillsLen = Array.isArray((personaJson as any)?.skills) ? (personaJson as any).skills.length : 0;
-    const coreCompetenciesLen = Array.isArray((personaJson as any)?.core_competencies)
-      ? (personaJson as any).core_competencies.length
-      : 0;
-    const highlightsLen = Array.isArray((personaJson as any)?.career_highlights)
-      ? (personaJson as any).career_highlights.length
-      : 0;
+    const coreCompetenciesLen = Array.isArray((personaJson as any)?.core_competencies) ? (personaJson as any).core_competencies.length : 0;
+    const highlightsLen = Array.isArray((personaJson as any)?.career_highlights) ? (personaJson as any).career_highlights.length : 0;
 
-    // Include keys count as a cheap proxy for "shape changed".
     const keysCount = Object.keys(personaJson).length;
 
-    // Keep summary payload small: only use lengths (not full text) for potentially long fields.
     return [
       'k:' + String(keysCount),
       'h:' + String(profileHeadline.length),
@@ -852,17 +883,9 @@ export default function App() {
   // When we enter draft state, attempt to fetch orchestration artifacts and populate UI persona (best-effort).
   useEffect(() => {
     if (!buildId || state !== 'draft' || hasError) return;
-
-    // Non-reentrant: if we're already applying artifacts for this build, skip.
     if (isApplyingArtifactsRef.current[buildId]) return;
 
-    /**
-     * Ignore/unmount guard:
-     * - prevents setState after unmount
-     * - prevents applying results from an older effect instance after deps change
-     */
     let isIgnore = false;
-
     const generationId = generationIdRef.current;
 
     const loadData = async () => {
@@ -873,37 +896,48 @@ export default function App() {
         const orch = await getOrchestrationByBuild(buildId);
         if (isIgnore) return;
 
-        const { personaJson } = extractPersonaJsonFromOrchestrationRecord(orch);
+        logAvailableKeys(`[artifacts][gen:${generationId}] orchestration`, orch);
 
-        // Only proceed if personaJson is a real object with keys
-        if (!personaJson || typeof personaJson !== 'object' || Object.keys(personaJson).length === 0) return;
+        const { personaJson, sourcePath } = extractPersonaJsonFromOrchestrationRecord(orch);
+
+        // eslint-disable-next-line no-console
+        console.log(`[persona][extract][gen:${generationId}] selected`, {
+          buildId,
+          sourcePath,
+          personaType: Array.isArray(personaJson) ? 'array' : typeof personaJson,
+          personaKeys: isNonEmptyObject(personaJson) ? Object.keys(personaJson) : [],
+        });
+
+        if (!personaJson || typeof personaJson !== 'object' || Object.keys(personaJson).length === 0) {
+          // eslint-disable-next-line no-console
+          console.warn(`[persona][extract][gen:${generationId}] no persona payload found in orchestration record`, {
+            buildId,
+            sourcePath,
+          });
+          return;
+        }
 
         const artifactFingerprint = fingerprintPersonaArtifact(personaJson);
-
-        // Gate 1: if raw artifact fingerprint is identical to what we've already applied, do nothing.
         if (artifactFingerprint === lastAppliedPersonaArtifactFingerprintRef.current[buildId]) return;
 
-        // Compute next persona data once (outside setState) to avoid replay cost.
         const baseline = personaDataRef.current;
         const next = coercePersonaDataFromBackendJson(personaJson, baseline);
         const nextUiFingerprint = fingerprintPersonaData(next);
 
-        // Gate 2: if UI-visible fields didn't change, do not set state,
-        // but still remember we've seen this artifact payload.
         if (nextUiFingerprint === lastAppliedPersonaUiFingerprintRef.current[buildId]) {
           lastAppliedPersonaArtifactFingerprintRef.current[buildId] = artifactFingerprint;
+          if (sourcePath) lastAppliedPersonaSourcePathRef.current[buildId] = sourcePath;
           return;
         }
 
-        // Commit: update refs first (idempotent), then setState once.
         lastAppliedPersonaArtifactFingerprintRef.current[buildId] = artifactFingerprint;
         lastAppliedPersonaUiFingerprintRef.current[buildId] = nextUiFingerprint;
+        if (sourcePath) lastAppliedPersonaSourcePathRef.current[buildId] = sourcePath;
 
         if (!isIgnore && isMountedRef.current) {
           setPersonaData(next);
         }
       } catch (err) {
-        // best-effort only; ignore, but log for diagnostics
         // eslint-disable-next-line no-console
         console.error(`[artifacts][gen:${generationId}] artifact fetch failed`, err);
       } finally {
@@ -918,13 +952,86 @@ export default function App() {
     };
   }, [buildId, state, hasError]);
 
-  // Load versions whenever personaId becomes available.
+  /**
+   * When we enter finalized state, attempt to apply the backend "final" persona if present.
+   */
   useEffect(() => {
-    // Guard: avoid backend 400s from undefined/empty/"null" IDs.
-    if (!personaId || personaId === 'null') return;
-    refreshVersions(personaId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [personaId]);
+    if (!buildId || state !== 'finalized' || hasError) return;
+    if (isApplyingArtifactsRef.current[buildId]) return;
+
+    let isIgnore = false;
+    const generationId = generationIdRef.current;
+
+    const loadFinal = async () => {
+      isApplyingArtifactsRef.current[buildId] = true;
+      try {
+        const { getOrchestrationByBuild } = await import('../lib/apiClient');
+        const orch = await getOrchestrationByBuild(buildId);
+        if (isIgnore) return;
+
+        logAvailableKeys(`[final][gen:${generationId}] orchestration`, orch);
+
+        const preferredFinalPaths: Array<Array<string>> = [
+          ['artifacts', 'finalPersona'],
+          ['artifacts', 'final'],
+          ['results', 'finalize', 'final'],
+        ];
+
+        let finalHit: { personaJson: any; sourcePath: string } | null = null;
+        for (const path of preferredFinalPaths) {
+          const hit = getNestedOrchestrationValue(orch, path);
+          if (hit?.value !== undefined && hit?.value !== null) {
+            finalHit = { personaJson: hit.value, sourcePath: hit.foundPath };
+            break;
+          }
+        }
+
+        const extracted = finalHit ?? extractPersonaJsonFromOrchestrationRecord(orch);
+        const personaJson = (extracted as any).personaJson;
+        const sourcePath = (extracted as any).sourcePath ?? null;
+
+        // eslint-disable-next-line no-console
+        console.log(`[persona][final-extract][gen:${generationId}] selected`, {
+          buildId,
+          sourcePath,
+          personaType: Array.isArray(personaJson) ? 'array' : typeof personaJson,
+          personaKeys: isNonEmptyObject(personaJson) ? Object.keys(personaJson) : [],
+        });
+
+        if (!personaJson || typeof personaJson !== 'object' || Object.keys(personaJson).length === 0) return;
+
+        const artifactFingerprint = fingerprintPersonaArtifact(personaJson);
+        if (artifactFingerprint === lastAppliedPersonaArtifactFingerprintRef.current[buildId]) return;
+
+        const baseline = personaDataRef.current;
+        const next = coercePersonaDataFromBackendJson(personaJson, baseline);
+        const nextUiFingerprint = fingerprintPersonaData(next);
+
+        if (nextUiFingerprint === lastAppliedPersonaUiFingerprintRef.current[buildId]) {
+          lastAppliedPersonaArtifactFingerprintRef.current[buildId] = artifactFingerprint;
+          if (sourcePath) lastAppliedPersonaSourcePathRef.current[buildId] = sourcePath;
+          return;
+        }
+
+        lastAppliedPersonaArtifactFingerprintRef.current[buildId] = artifactFingerprint;
+        lastAppliedPersonaUiFingerprintRef.current[buildId] = nextUiFingerprint;
+        if (sourcePath) lastAppliedPersonaSourcePathRef.current[buildId] = sourcePath;
+
+        if (!isIgnore && isMountedRef.current) setPersonaData(next);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[final][gen:${generationId}] artifact fetch failed`, err);
+      } finally {
+        isApplyingArtifactsRef.current[buildId] = false;
+      }
+    };
+
+    loadFinal();
+
+    return () => {
+      isIgnore = true;
+    };
+  }, [buildId, state, hasError]);
 
   const removeSkill = (skillToRemove: string) => {
     if (!personaData) return;
@@ -950,11 +1057,8 @@ export default function App() {
     if (!e.target.files || !e.target.files[0]) return;
 
     const file = e.target.files[0];
-
-    // Reset the input so selecting the same image again re-triggers onChange.
     e.target.value = '';
 
-    // Revoke any previous object URL to prevent memory leaks.
     if (profileImageObjectUrlRef.current) {
       URL.revokeObjectURL(profileImageObjectUrlRef.current);
       profileImageObjectUrlRef.current = null;
@@ -992,13 +1096,18 @@ export default function App() {
     setHasUnsavedChanges(true);
   };
 
+  /**
+   * Header avatar initials:
+   * - Prefer role/designation (personaTitle) since we are not exposing user name near the headline.
+   * - Fall back to name if role not available (still safe; just initials).
+   */
   const avatarInitials = useMemo(() => {
-    return getInitials((personaName || personaTitle).trim());
-  }, [personaName, personaTitle]);
+    return getInitials((personaTitle || personaName).trim());
+  }, [personaTitle, personaName]);
 
   const personaCardInitials = useMemo(() => {
-    return getInitials(personaName);
-  }, [personaName]);
+    return getInitials((personaTitle || personaName).trim());
+  }, [personaTitle, personaName]);
 
   const currentStep = state === 'initial' || state === 'processing' ? 1 : state === 'draft' ? 2 : 3;
   const step1Complete = state === 'draft' || state === 'finalized';
@@ -1008,7 +1117,7 @@ export default function App() {
   const getFileType = (fileName: string): string => {
     const extension = fileName.split('.').pop()?.toUpperCase();
     return extension || 'FILE';
-  }
+  };
 
   return (
     <div
@@ -1032,11 +1141,32 @@ export default function App() {
             >
               <Compass size={20} style={{ color: 'white' }} />
             </div>
-            <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', margin: 0 }}>Career Navigator</h1>
+
+            <div className="flex flex-col">
+              <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', margin: 0 }}>Career Navigator</h1>
+
+              {/* Per requirement: NOTHING under the "Career Navigator" headline */}
+            </div>
           </div>
 
-          {/* RIGHT - Profile Circle */}
-          <div className="relative">
+          {/* RIGHT - Profile Circle + role/designation */}
+          <div className="relative flex items-center gap-3">
+            {/* Role/Designation derived from persona/documents */}
+            <div className="min-w-0 text-right">
+              <div
+                style={{
+                  fontSize: '12px',
+                  color: '#6B7280',
+                  fontWeight: 600,
+                  lineHeight: '1.1',
+                }}
+                className="truncate"
+                title={personaTitle || ''}
+              >
+                {personaTitle || ''}
+              </div>
+            </div>
+
             <button
               onClick={() => setIsProfileOpen(!isProfileOpen)}
               className="w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200"
@@ -1047,19 +1177,19 @@ export default function App() {
                 fontWeight: 600,
               }}
               aria-label="Open profile menu"
-              title={personaName || personaTitle || 'Profile'}
+              title={personaTitle || 'Your profile'}
             >
               {avatarInitials}
             </button>
 
             <AnimatePresence>
-              {isProfileOpen && (
+              {!isFileDialogActive && isProfileOpen && (
                 <motion.div
                   initial={{ opacity: 0, y: -10 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -10 }}
                   transition={{ duration: 0.2 }}
-                  className="absolute right-0 mt-2 w-40 bg-white rounded-lg"
+                  className="absolute right-0 top-full mt-2 w-40 bg-white rounded-lg"
                   style={{
                     border: '1px solid #D1D5DB',
                     boxShadow: '0 8px 20px rgba(0, 0, 0, 0.08)',
@@ -1156,7 +1286,7 @@ export default function App() {
       </div>
 
       {/* Main Content */}
-      <main style={{ padding: state === 'finalized' ? '48px 32px' : '48px 32px' }}>
+      <main style={{ padding: '48px 32px' }}>
         {/* Initial State */}
         {state === 'initial' && (
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="max-w-2xl mx-auto text-center">
@@ -1174,19 +1304,10 @@ export default function App() {
               }}
             >
               View Current State Persona
-              <motion.span
-                className="upload-heading-underline"
-                initial={{ width: 0 }}
-                animate={{ width: '100%' }}
-                transition={{ duration: 0.5, ease: 'easeOut' }}
-                // Adding a static key prevents Framer Motion from re-calculating layout transitions
-                // when the parent state changes.
-                key="static-underline"
-              />
+              <motion.span className="upload-heading-underline" initial={{ width: 0 }} animate={{ width: '100%' }} transition={{ duration: 0.5, ease: 'easeOut' }} key="static-underline" />
             </motion.h2>
             <p style={{ fontSize: '16px', color: '#6B7280', marginBottom: '32px' }}>Upload your Professional Documents to generate your AI-powered Persona</p>
 
-            {/* Keep the file input OUTSIDE the clickable dropzone to avoid self-trigger loops */}
             <input
               ref={fileInputRef}
               type="file"
@@ -1195,11 +1316,11 @@ export default function App() {
               onChange={handleFileChange}
               style={{
                 display: 'none',
-                position: 'fixed', // Use fixed to remove it from the document flow
+                position: 'fixed',
                 top: '-1000px',
                 left: '-1000px',
               }}
-              tabIndex={-1} // Prevents accidental focus loops
+              tabIndex={-1}
             />
 
             <div
@@ -1209,12 +1330,13 @@ export default function App() {
                 marginBottom: '24px',
                 border: '1px solid rgba(20, 184, 166, 0.3)',
               }}
-              // Important: no onClick on this outer wrapper. Only the intended dropzone triggers the file picker.
               onMouseEnter={(e) => {
+                if (!shouldAllowHoverEffects()) return;
                 e.currentTarget.style.border = '1px solid #14B8A6';
                 e.currentTarget.style.boxShadow = '0px 6px 16px rgba(20, 184, 166, 0.15)';
               }}
               onMouseLeave={(e) => {
+                if (!shouldAllowHoverEffects()) return;
                 e.currentTarget.style.border = '1px solid rgba(20, 184, 166, 0.3)';
                 e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
               }}
@@ -1227,7 +1349,6 @@ export default function App() {
                   borderColor: '#D1D5DB',
                   backgroundColor: uploadedFiles.length > 0 ? 'rgba(20, 184, 166, 0.05)' : 'transparent',
                 }}
-                // Drag/drop only: do NOT make this div clickable to avoid recursive click loops/freezes.
                 role="region"
                 aria-label="Upload documents (drag and drop)"
               >
@@ -1236,13 +1357,12 @@ export default function App() {
                   {uploadedFiles.length > 0 ? `${uploadedFiles.length} file(s) uploaded` : 'Upload your Documents '}
                 </p>
                 <p style={{ fontSize: '14px', color: '#6B7280' }}>Resume, Job Description, Performance Review, Certifications</p>
-                <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '12px' }}>
-                  Supported formats: PDF, DOCX, TXT (Max {MAX_FILES} files)
-                </p>
+                <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '12px' }}>Supported formats: PDF, DOCX, TXT (Max {MAX_FILES} files)</p>
 
                 <button
                   type="button"
                   onClick={openFilePicker}
+                  disabled={isFileDialogActive}
                   className="inline-flex items-center justify-center rounded-lg transition-all duration-200"
                   style={{
                     backgroundColor: '#14B8A6',
@@ -1251,12 +1371,15 @@ export default function App() {
                     fontSize: '14px',
                     fontWeight: 600,
                     border: 'none',
-                    cursor: 'pointer',
+                    cursor: isFileDialogActive ? 'not-allowed' : 'pointer',
+                    opacity: isFileDialogActive ? 0.85 : 1,
                   }}
                   onMouseEnter={(e) => {
+                    if (!shouldAllowHoverEffects()) return;
                     e.currentTarget.style.backgroundColor = '#0FB9B1';
                   }}
                   onMouseLeave={(e) => {
+                    if (!shouldAllowHoverEffects()) return;
                     e.currentTarget.style.backgroundColor = '#14B8A6';
                   }}
                 >
@@ -1286,25 +1409,17 @@ export default function App() {
                       key={fileData.id}
                       className="flex items-center justify-between p-3 rounded-lg bg-gray-50 hover:bg-gray-100 transition-colors"
                       onClick={(e) => {
-                        // This row should not re-open the file picker if clicked.
                         e.stopPropagation();
                       }}
                     >
                       <div className="flex items-center gap-3">
-                        <span
-                          className="px-2 py-1 rounded text-xs font-medium"
-                          style={{
-                            backgroundColor: 'rgba(20, 184, 166, 0.1)',
-                            color: '#14B8A6',
-                          }}
-                        >
+                        <span className="px-2 py-1 rounded text-xs font-medium" style={{ backgroundColor: 'rgba(20, 184, 166, 0.1)', color: '#14B8A6' }}>
                           {getFileType(fileData.file.name)}
                         </span>
                         <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>{fileData.file.name}</span>
                       </div>
                       <button
                         onClick={(e) => {
-                          // Critical: stop bubbling so the parent dropzone doesn't re-trigger file dialog.
                           e.stopPropagation();
                           removeFile(fileData.id);
                         }}
@@ -1333,14 +1448,10 @@ export default function App() {
                 cursor: uploadedFiles.length > 0 ? 'pointer' : 'not-allowed',
               }}
               onMouseEnter={(e) => {
-                if (uploadedFiles.length > 0) {
-                  e.currentTarget.style.backgroundColor = '#0FB9B1';
-                }
+                if (uploadedFiles.length > 0) e.currentTarget.style.backgroundColor = '#0FB9B1';
               }}
               onMouseLeave={(e) => {
-                if (uploadedFiles.length > 0) {
-                  e.currentTarget.style.backgroundColor = '#14B8A6';
-                }
+                if (uploadedFiles.length > 0) e.currentTarget.style.backgroundColor = '#14B8A6';
               }}
             >
               Generate Draft Persona
@@ -1350,19 +1461,19 @@ export default function App() {
 
         {/* Processing/Draft State - Two Column Layout */}
         {(state === 'processing' || state === 'draft') && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.3 }}
-            className="max-w-7xl mx-auto"
-            style={{ paddingBottom: isEditable && state === 'draft' ? '100px' : '0' }}
-          >
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }} className="max-w-7xl mx-auto" style={{ paddingBottom: '0' }}>
             <motion.h2
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.3 }}
-              onMouseEnter={() => setIsHoveringHeading(true)}
-              onMouseLeave={() => setIsHoveringHeading(false)}
+              onMouseEnter={() => {
+                if (isFileDialogActive) return;
+                setIsHoveringHeading(true);
+              }}
+              onMouseLeave={() => {
+                if (isFileDialogActive) return;
+                setIsHoveringHeading(false);
+              }}
               className="relative inline-block cursor-default mx-auto"
               style={{
                 fontSize: state === 'draft' ? '36px' : '32px',
@@ -1375,7 +1486,7 @@ export default function App() {
               }}
             >
               {state === 'processing' ? 'View Current State Persona' : 'Draft Persona'}
-              {state === 'draft' && isHoveringHeading && (
+              {state === 'draft' && isHoveringHeading && !isFileDialogActive && (
                 <motion.div
                   initial={{ scaleX: 0 }}
                   animate={{ scaleX: 1 }}
@@ -1397,12 +1508,7 @@ export default function App() {
 
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
               {/* Left Column - Upload Status */}
-              <motion.div
-                initial={{ x: state === 'draft' ? 0 : -20, opacity: 0 }}
-                animate={{ x: 0, opacity: 1 }}
-                transition={{ duration: 0.3, delay: 0.1, ease: 'easeInOut' }}
-                className="lg:col-span-2"
-              >
+              <motion.div initial={{ x: state === 'draft' ? 0 : -20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} transition={{ duration: 0.3, delay: 0.1, ease: 'easeInOut' }} className="lg:col-span-2">
                 {state === 'draft' && (
                   <button
                     onClick={() => setState('initial')}
@@ -1419,6 +1525,7 @@ export default function App() {
                     ← Go Back
                   </button>
                 )}
+
                 <div
                   className="bg-white rounded-xl transition-all duration-300"
                   style={{
@@ -1427,10 +1534,12 @@ export default function App() {
                     border: '1px solid rgba(20, 184, 166, 0.3)',
                   }}
                   onMouseEnter={(e) => {
+                    if (!shouldAllowHoverEffects()) return;
                     e.currentTarget.style.border = '1px solid #14B8A6';
                     e.currentTarget.style.boxShadow = '0px 6px 16px rgba(20, 184, 166, 0.15)';
                   }}
                   onMouseLeave={(e) => {
+                    if (!shouldAllowHoverEffects()) return;
                     e.currentTarget.style.border = '1px solid rgba(20, 184, 166, 0.3)';
                     e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
                   }}
@@ -1468,7 +1577,9 @@ export default function App() {
                             fontWeight: 500,
                           }}
                         >
-                          {buildStatus ? `Processing (${buildStatus.progress}%)${buildStatus.currentStep ? ` · ${buildStatus.currentStep}` : ''}` : 'Processing...'}
+                          {buildStatus
+                            ? `Processing (${buildStatus.progress}%)${buildStatus.currentStep ? ` · ${buildStatus.currentStep}` : ''}`
+                            : 'Processing...'}
                         </span>
                       </>
                     ) : (
@@ -1489,7 +1600,7 @@ export default function App() {
                     )}
                   </div>
 
-                  {/* Backend error banner (best-effort; shown where user is looking) */}
+                  {/* Backend error banner */}
                   {backendError && (
                     <div
                       className="mb-4 rounded-lg p-3"
@@ -1502,33 +1613,6 @@ export default function App() {
                       }}
                     >
                       {backendError}
-                    </div>
-                  )}
-
-                  {/* Version history (if persona exists / backend configured) */}
-                  {state === 'draft' && (
-                    <div className="mb-2">
-                      <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '10px' }}>Version History</h4>
-
-                      {isLoadingVersions ? (
-                        <div className="flex items-center gap-2" style={{ color: '#6B7280', fontSize: '13px' }}>
-                          <Loader2 className="animate-spin" size={14} />
-                          Loading versions...
-                        </div>
-                      ) : versionsError ? (
-                        <div style={{ color: '#DC2626', fontSize: '13px' }}>{versionsError}</div>
-                      ) : versions.length === 0 ? (
-                        <div style={{ color: '#6B7280', fontSize: '13px' }}>{personaId ? 'No versions found yet.' : 'No saved persona yet (versions available after save).'}</div>
-                      ) : (
-                        <div className="space-y-2">
-                          {versions.slice(0, 5).map((v) => (
-                            <div key={v.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
-                              <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>v{v.version}</div>
-                              <div style={{ fontSize: '12px', color: '#6B7280' }}>{new Date(v.createdAt).toLocaleString()}</div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
                     </div>
                   )}
 
@@ -1583,15 +1667,17 @@ export default function App() {
                       border: '1px solid rgba(20, 184, 166, 0.3)',
                     }}
                     onMouseEnter={(e) => {
+                      if (!shouldAllowHoverEffects()) return;
                       e.currentTarget.style.border = '1px solid #14B8A6';
                       e.currentTarget.style.boxShadow = '0px 6px 16px rgba(20, 184, 166, 0.15)';
                     }}
                     onMouseLeave={(e) => {
+                      if (!shouldAllowHoverEffects()) return;
                       e.currentTarget.style.border = '1px solid rgba(20, 184, 166, 0.3)';
                       e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
                     }}
                   >
-                    <div className="flex items-center justify-between mb-6">
+                    <div className="flex items-center justify-between mb-6 gap-3 flex-wrap">
                       <h3
                         style={{
                           fontSize: '20px',
@@ -1608,29 +1694,67 @@ export default function App() {
                       >
                         Draft Persona
                       </h3>
-                      <div className="flex items-center gap-2">
+
+                      <div className="flex flex-wrap items-center gap-2 justify-end">
+                        <button
+                          onClick={handleRegenerateDraft}
+                          className="rounded-lg transition-colors"
+                          style={{
+                            padding: '8px 14px',
+                            backgroundColor: 'transparent',
+                            color: '#6B7280',
+                            border: '1px solid #D1D5DB',
+                            fontSize: '14px',
+                            fontWeight: 500,
+                          }}
+                        >
+                          Regenerate Draft
+                        </button>
+
+                        <button
+                          onClick={handleFinalize}
+                          className="rounded-lg transition-all duration-200"
+                          style={{
+                            padding: '8px 14px',
+                            backgroundColor: '#14B8A6',
+                            color: 'white',
+                            border: 'none',
+                            fontSize: '14px',
+                            fontWeight: 500,
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor = '#0FB9B1';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor = '#14B8A6';
+                          }}
+                        >
+                          Finalize Persona
+                        </button>
+
                         {isEditable && (
                           <button
                             onClick={handleSaveChanges}
                             className="flex items-center gap-2 rounded-lg transition-all duration-200"
                             style={{
-                              padding: '8px 16px',
-                              backgroundColor: '#14B8A6',
-                              color: 'white',
-                              border: 'none',
+                              padding: '8px 14px',
+                              backgroundColor: 'rgba(20, 184, 166, 0.10)',
+                              color: '#0F766E',
+                              border: '1px solid rgba(20, 184, 166, 0.35)',
                               fontSize: '14px',
-                              fontWeight: 500,
+                              fontWeight: 600,
                             }}
                             onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = '#0FB9B1';
+                              e.currentTarget.style.backgroundColor = 'rgba(20, 184, 166, 0.16)';
                             }}
                             onMouseLeave={(e) => {
-                              e.currentTarget.style.backgroundColor = '#14B8A6';
+                              e.currentTarget.style.backgroundColor = 'rgba(20, 184, 166, 0.10)';
                             }}
                           >
                             Save Changes
                           </button>
                         )}
+
                         <AnimatePresence>
                           {showSaveSuccess && (
                             <motion.span
@@ -1650,11 +1774,12 @@ export default function App() {
                             </motion.span>
                           )}
                         </AnimatePresence>
+
                         <button
                           onClick={() => setIsEditable(!isEditable)}
                           className="flex items-center gap-2 rounded-lg transition-colors"
                           style={{
-                            padding: '8px 16px',
+                            padding: '8px 14px',
                             backgroundColor: isEditable ? 'rgba(20, 184, 166, 0.1)' : 'transparent',
                             color: '#14B8A6',
                             border: '1px solid #14B8A6',
@@ -1668,7 +1793,7 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Persona Header */}
+                    {/* Persona Header: show role/designation; do not emphasize name in UI requirements */}
                     <div className="flex items-center gap-4 mb-6 pb-6" style={{ borderBottom: '1px solid #D1D5DB' }}>
                       <div className="relative group">
                         <input
@@ -1687,10 +1812,7 @@ export default function App() {
                         {personaData?.profileImage ? (
                           <img src={personaData.profileImage} alt="Profile" className="w-16 h-16 rounded-full object-cover flex-shrink-0" />
                         ) : (
-                          <div
-                            className="w-16 h-16 rounded-full flex items-center justify-center flex-shrink-0"
-                            style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '24px', fontWeight: 600 }}
-                          >
+                          <div className="w-16 h-16 rounded-full flex items-center justify-center flex-shrink-0" style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '24px', fontWeight: 600 }}>
                             {personaCardInitials}
                           </div>
                         )}
@@ -1706,14 +1828,16 @@ export default function App() {
                           </button>
                         )}
                       </div>
+
                       <div className="flex-1">
                         {isEditable ? (
                           <>
+                            {/* Keep name editable for internal data, but UI requirement only mandates role/designation display. */}
                             <input
                               type="text"
-                              value={personaData?.name ?? ''}
+                              value={personaData?.title ?? ''}
                               onChange={(e) => {
-                                setPersonaData({ ...personaData, name: e.target.value });
+                                setPersonaData({ ...personaData, title: e.target.value });
                                 setHasUnsavedChanges(true);
                               }}
                               className="w-full mb-2 rounded-lg border"
@@ -1721,15 +1845,16 @@ export default function App() {
                                 padding: '8px 12px',
                                 borderColor: '#D1D5DB',
                                 fontSize: '20px',
-                                fontWeight: 600,
+                                fontWeight: 700,
                                 color: '#1F2937',
                               }}
+                              placeholder="Role / Designation"
                             />
                             <input
                               type="text"
-                              value={personaData?.title ?? ''}
+                              value={personaData?.name ?? ''}
                               onChange={(e) => {
-                                setPersonaData({ ...personaData, title: e.target.value });
+                                setPersonaData({ ...personaData, name: e.target.value });
                                 setHasUnsavedChanges(true);
                               }}
                               className="w-full rounded-lg border"
@@ -1739,12 +1864,16 @@ export default function App() {
                                 fontSize: '14px',
                                 color: '#6B7280',
                               }}
+                              placeholder="(Optional) Name"
                             />
                           </>
                         ) : (
                           <>
-                            <h4 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', marginBottom: '4px' }}>{personaData?.name ?? ''}</h4>
-                            <p style={{ fontSize: '14px', color: '#6B7280' }}>{personaData?.title ?? ''}</p>
+                            <h4 style={{ fontSize: '20px', fontWeight: 700, color: '#1F2937', marginBottom: '4px' }}>
+                              {personaTitle || ''}
+                            </h4>
+                            {/* Name intentionally de-emphasized; keep as secondary if present */}
+                            {personaName ? <p style={{ fontSize: '14px', color: '#6B7280' }}>{personaName}</p> : null}
                           </>
                         )}
                       </div>
@@ -1763,7 +1892,7 @@ export default function App() {
                             fontWeight: 500,
                           }}
                         >
-                          AI Generated
+                          Draft
                         </span>
                       </div>
                       {isEditable ? (
@@ -1784,7 +1913,7 @@ export default function App() {
                           }}
                         />
                       ) : (
-                        <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>{personaData?.summary ?? ''}</p>
+                        <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>{personaSummary}</p>
                       )}
                     </div>
 
@@ -1811,6 +1940,7 @@ export default function App() {
                             )}
                           </span>
                         ))}
+
                         {isEditable && isAddingSkill && (
                           <input
                             ref={newSkillInputRef}
@@ -1828,9 +1958,7 @@ export default function App() {
                               }
                             }}
                             onBlur={() => {
-                              if (newSkillValue.trim()) {
-                                addSkill(newSkillValue);
-                              }
+                              if (newSkillValue.trim()) addSkill(newSkillValue);
                               setNewSkillValue('');
                               setIsAddingSkill(false);
                             }}
@@ -1846,6 +1974,7 @@ export default function App() {
                             placeholder="Type skill..."
                           />
                         )}
+
                         {isEditable && !isAddingSkill && (
                           <button
                             onClick={() => {
@@ -1975,10 +2104,10 @@ export default function App() {
                           </div>
                         ))}
                       </div>
+
                       {isEditable && (
                         <button
                           onClick={() => {
-                            // Add experience logic
                             const newExp: Experience = {
                               id: Math.random().toString(36).substr(2, 9),
                               role: 'New Role',
@@ -2009,74 +2138,62 @@ export default function App() {
                     {/* Career Highlights */}
                     <div>
                       <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Career Highlights</h4>
+
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {(personaData?.careerHighlights ?? []).map((highlight, idx) => (
-                          <div key={idx} className="p-3 rounded-lg border flex items-start gap-2" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
+                        {(personaData?.careerHighlights ?? []).map((item, idx) => (
+                          <div key={`${idx}-${item.highlight}`} className="p-3 rounded-lg border flex items-start gap-2" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
                             <Award size={16} style={{ color: '#14B8A6', marginTop: '2px', flexShrink: 0 }} />
-                            <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5' }}>{highlight}</p>
+                            <div className="min-w-0 w-full">
+                              <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5', marginBottom: item.sourceExperience ? '6px' : 0 }}>{item.highlight}</p>
+
+                              {item.sourceExperience && (
+                                <div
+                                  className="flex items-start gap-2 rounded-md px-2 py-1 w-full max-w-full"
+                                  style={{
+                                    backgroundColor: 'rgba(20, 184, 166, 0.10)',
+                                    border: '1px solid rgba(20, 184, 166, 0.25)',
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      fontSize: '12px',
+                                      color: '#0F766E',
+                                      fontWeight: 600,
+                                      flexShrink: 0,
+                                      lineHeight: '1.2',
+                                      marginTop: '1px',
+                                    }}
+                                  >
+                                    Source
+                                  </span>
+                                  <span
+                                    style={{
+                                      fontSize: '12px',
+                                      color: '#0F766E',
+                                      fontWeight: 500,
+                                      lineHeight: '1.2',
+                                      overflowWrap: 'anywhere',
+                                      wordBreak: 'break-word',
+                                    }}
+                                    className="min-w-0"
+                                  >
+                                    {item.sourceExperience}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
                           </div>
                         ))}
                       </div>
+
+                      {(personaData?.careerHighlights ?? []).length === 0 && (
+                        <p style={{ fontSize: '13px', color: '#6B7280', lineHeight: '1.5' }}>No career highlights found in the draft yet.</p>
+                      )}
                     </div>
                   </div>
                 </motion.div>
               )}
             </div>
-
-            {/* Sticky Bottom Bar */}
-            <AnimatePresence>
-              {isEditable && state === 'draft' && (
-                <motion.div
-                  initial={{ y: 100, opacity: 0 }}
-                  animate={{ y: 0, opacity: 1 }}
-                  exit={{ y: 100, opacity: 0 }}
-                  transition={{ duration: 0.3 }}
-                  className="fixed bottom-0 left-0 right-0 bg-white border-t"
-                  style={{
-                    borderColor: '#D1D5DB',
-                    padding: '16px 32px',
-                    boxShadow: '0px -4px 12px rgba(0, 0, 0, 0.05)',
-                  }}
-                >
-                  <div className="max-w-7xl mx-auto flex items-center justify-between">
-                    <button
-                      onClick={() => setIsEditable(false)}
-                      className="rounded-lg transition-colors"
-                      style={{
-                        padding: '12px 20px',
-                        backgroundColor: 'transparent',
-                        color: '#6B7280',
-                        border: '1px solid #D1D5DB',
-                        fontSize: '14px',
-                        fontWeight: 500,
-                      }}
-                    >
-                      Discard Draft
-                    </button>
-                    <button
-                      onClick={handleFinalize}
-                      className="rounded-lg transition-all duration-200"
-                      style={{
-                        padding: '12px 20px',
-                        backgroundColor: '#14B8A6',
-                        color: 'white',
-                        border: 'none',
-                        fontSize: '14px',
-                        fontWeight: 500,
-                      }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.backgroundColor = '#0FB9B1';
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.backgroundColor = '#14B8A6';
-                      }}
-                    >
-                      Finalize Persona
-                    </button>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
           </motion.div>
         )}
 
@@ -2097,6 +2214,7 @@ export default function App() {
             >
               ← Go Back
             </button>
+
             <h2
               onMouseEnter={(e) => {
                 setIsHoveringHeading(true);
@@ -2149,13 +2267,15 @@ export default function App() {
                 border: '1px solid rgba(20, 184, 166, 0.3)',
               }}
               onMouseEnter={(e) => {
+                if (!shouldAllowHoverEffects()) return;
                 e.currentTarget.style.boxShadow = '0px 8px 20px rgba(20, 184, 166, 0.2)';
               }}
               onMouseLeave={(e) => {
+                if (!shouldAllowHoverEffects()) return;
                 e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
               }}
             >
-              {/* Persona Header */}
+              {/* Persona Header: role/designation first */}
               <div className="flex items-center gap-4 mb-8 pb-6" style={{ borderBottom: '1px solid #D1D5DB' }}>
                 {personaData?.profileImage ? (
                   <img src={personaData.profileImage} alt="Profile" className="w-20 h-20 rounded-full object-cover flex-shrink-0" />
@@ -2164,16 +2284,17 @@ export default function App() {
                     {personaCardInitials}
                   </div>
                 )}
+
                 <div>
-                  <h3 style={{ fontSize: '24px', fontWeight: 600, color: '#1F2937', marginBottom: '4px' }}>{personaName}</h3>
-                  <p style={{ fontSize: '16px', color: '#6B7280' }}>{personaTitle}</p>
+                  <h3 style={{ fontSize: '24px', fontWeight: 700, color: '#1F2937', marginBottom: '4px' }}>{personaTitle}</h3>
+                  {personaName ? <p style={{ fontSize: '16px', color: '#6B7280' }}>{personaName}</p> : null}
                 </div>
               </div>
 
               {/* Professional Summary */}
               <div className="mb-8">
                 <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Professional Summary</h4>
-                <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>{personaData.summary}</p>
+                <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>{personaSummary}</p>
               </div>
 
               {/* Skills */}
@@ -2211,39 +2332,27 @@ export default function App() {
               <div className="mb-8">
                 <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Career Highlights</h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {personaData.careerHighlights.map((highlight, idx) => (
-                    <div key={idx} className="p-3 rounded-lg border flex items-start gap-2" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
+                  {personaData.careerHighlights.map((item, idx) => (
+                    <div key={`${idx}-${item.highlight}`} className="p-3 rounded-lg border flex items-start gap-2" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
                       <Award size={16} style={{ color: '#14B8A6', marginTop: '2px', flexShrink: 0 }} />
-                      <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5' }}>{highlight}</p>
+                      <div className="min-w-0 w-full">
+                        <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5', marginBottom: item.sourceExperience ? '6px' : 0 }}>{item.highlight}</p>
+
+                        {item.sourceExperience && (
+                          <div className="flex items-start gap-2 rounded-md px-2 py-1 w-full max-w-full" style={{ backgroundColor: 'rgba(20, 184, 166, 0.10)', border: '1px solid rgba(20, 184, 166, 0.25)' }}>
+                            <span style={{ fontSize: '12px', color: '#0F766E', fontWeight: 600, flexShrink: 0, lineHeight: '1.2', marginTop: '1px' }}>Source</span>
+                            <span style={{ fontSize: '12px', color: '#0F766E', fontWeight: 500, lineHeight: '1.2', overflowWrap: 'anywhere', wordBreak: 'break-word' }} className="min-w-0">
+                              {item.sourceExperience}
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
               </div>
 
-              {/* Version history (finalized) */}
-              <div>
-                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Version History</h4>
-
-                {isLoadingVersions ? (
-                  <div className="flex items-center gap-2" style={{ color: '#6B7280', fontSize: '13px' }}>
-                    <Loader2 className="animate-spin" size={14} />
-                    Loading versions...
-                  </div>
-                ) : versionsError ? (
-                  <div style={{ color: '#DC2626', fontSize: '13px' }}>{versionsError}</div>
-                ) : versions.length === 0 ? (
-                  <div style={{ color: '#6B7280', fontSize: '13px' }}>{personaId ? 'No versions found yet.' : 'No saved persona yet (versions available after save).'}</div>
-                ) : (
-                  <div className="space-y-2">
-                    {versions.slice(0, 10).map((v) => (
-                      <div key={v.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
-                        <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>v{v.version}</div>
-                        <div style={{ fontSize: '12px', color: '#6B7280' }}>{new Date(v.createdAt).toLocaleString()}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              {/* Per requirement: no history/version tracking UI */}
             </motion.div>
           </motion.div>
         )}
