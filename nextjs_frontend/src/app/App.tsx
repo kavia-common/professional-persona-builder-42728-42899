@@ -148,15 +148,17 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
    * 1) Prefer candidates that look like an actual persona payload (draft/final JSON)
    * 2) Fall back to the first non-null candidate only if no persona-shaped object exists
    *    (and log that scenario for debugging).
+   *
+   * Authoritative candidate priority (per user_input_ref):
+   * - artifacts.draftPersona is often where live backend persona data resides.
    */
   const candidates: Array<Array<string>> = [
-    // Most likely canonical locations (PRIORITY ORDER MATTERS)
-    // Per attached user_input_ref: persona draft may be nested directly at these artifact locations.
+    // TOP PRIORITY (authoritative): live persona draft often stored here
     ['artifacts', 'draftPersona'],
+
+    // Other artifact envelopes
     ['artifacts', 'output'],
     ['artifacts', 'result'],
-
-    // Other known/observed locations
     ['artifacts', 'output', 'personaJson'],
     ['artifacts', 'finalPersona'],
 
@@ -170,8 +172,12 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
     ['final'],
     ['draftPersona'],
     ['draft'],
-    ['results', 'finalize', 'final'],
+
+    // Fallback (authoritative): may contain full persona, but can also be non-persona (personaId-only) in some shapes
     ['results', 'generate', 'persona'],
+
+    // Other legacy fallbacks
+    ['results', 'finalize', 'final'],
     ['persona'],
   ];
 
@@ -253,7 +259,7 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
   console.log('[persona][coerce] raw personaJson:', personaJson);
 
   try {
-    return {
+    const next: PersonaData = {
       ...fallback,
 
       // Map live backend keys to UI state keys
@@ -262,13 +268,15 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
       summary: personaJson?.professional_summary ?? personaJson?.summary ?? fallback.summary,
       skills: asStringArray(personaJson?.core_competencies ?? personaJson?.skills),
 
-      // Handle the nested text object in career highlights
+      // Handle array of strings OR array of objects { text: string } for highlights
       careerHighlights: Array.isArray(personaJson?.career_highlights)
         ? (personaJson.career_highlights
             .map((h: any) => (typeof h === 'object' && h !== null ? h.text : h))
             .filter((v: any) => typeof v === 'string' && v.trim().length > 0) as string[])
         : fallback.careerHighlights,
     };
+
+    return next;
   } catch (err) {
     return fallback;
   }
@@ -808,25 +816,25 @@ export default function App() {
          * Problem: orchestration fetch may return a new object identity each time (even if same data),
          * causing repeated setState calls and potential infinite render loops.
          *
-         * Solution:
-         * 1) Hash the raw artifact via stable JSON stringify and compare to the last applied hash for this buildId.
-         * 2) Inside setPersonaData, compute next and bail out if JSON.stringify(next) === JSON.stringify(prev).
-         * 3) Only after we've decided to apply (i.e., next differs) do we update the last-applied hash ref.
+         * Solution (MANDATORY):
+         * Phase 1: Hash the raw personaJson and compare against last applied per buildId.
+         * Phase 2: Deep compare coerced PersonaData (next vs prev) and only apply if it changes UI state.
          */
         if (personaJson && isNonEmptyObject(personaJson)) {
           const artifactJson = safeJsonStringify(personaJson);
 
-          // Check if the raw artifact has actually changed before processing
+          // Phase 1: Check the raw response hash
           if (artifactJson !== lastAppliedPersonaArtifactJsonRef.current[buildId]) {
             setPersonaData((prev) => {
               const next = coercePersonaDataFromBackendJson(personaJson, prev);
 
-              // DEEP COMPARISON: Only update state if the resulting object is actually different
+              // Phase 2: Deep compare the coerced data
+              // Only return 'next' if it actually changes the UI state
               if (JSON.stringify(next) === JSON.stringify(prev)) {
                 return prev;
               }
 
-              // Update the ref to track that we've processed this specific version
+              // Update the reference and return the new data
               lastAppliedPersonaArtifactJsonRef.current[buildId] = artifactJson;
               return next;
             });
