@@ -302,6 +302,10 @@ export default function App() {
   const personaTitle = personaData?.title ?? '';
   const personaSummary = personaData?.summary ?? '';
 
+  // Requested: top-of-component render log (helps diagnose loops + data churn)
+  // eslint-disable-next-line no-console
+  console.log('Rendering with data:', personaData);
+
   // Render-loop diagnostics logging (after primitives exist).
   if (renderDiagRef.current.count >= 30) {
     // eslint-disable-next-line no-console
@@ -669,27 +673,26 @@ export default function App() {
 
         setPersonaData((prev) => {
           /**
-           * Crucial stability fix (per user request):
-           * Only update personaData from backend artifacts ONCE, while personaData is still the fallback.
+           * Render-loop freeze fix (per user request):
+           * Only update state if the incoming data is actually different.
            *
-           * Why: repeated state updates from this effect can cause render churn/freezes if the upstream
-           * artifact fetch is re-triggered (or if the coerced object changes identity frequently).
-           *
-           * We consider "still fallback" when the summary is still equal to the initial fallback summary.
-           * (The initial fallback is empty string in this app.)
+           * We stringify for a pragmatic deep compare because the backend artifact object
+           * can change identity even when meaningfully identical.
            */
           const current = prev ?? initialPersonaFallback;
+          const coerced = coercePersonaDataFromBackendJson(maybeDraft, current);
 
-          const isStillFallback = current.summary === initialPersonaFallback.summary;
-          if (!isStillFallback) {
+          const prevJson = safeJsonStringify(current);
+          const nextJson = safeJsonStringify(coerced);
+
+          if (prevJson === nextJson) {
             console.log(
-              `[artifacts][gen:${generationId}] personaData already populated (not fallback); skipping state update to avoid loops`
+              `[artifacts][gen:${generationId}] personaData unchanged (JSON diff equal); skipping setPersonaData to avoid render loop`
             );
             return prev;
           }
 
-          const coerced = coercePersonaDataFromBackendJson(maybeDraft, current);
-          console.log(`[artifacts][gen:${generationId}] personaData populated from backend artifacts`);
+          console.log(`[artifacts][gen:${generationId}] personaData updated from backend artifacts (JSON diff changed)`);
           return coerced;
         });
       } catch (err) {
