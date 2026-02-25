@@ -370,6 +370,40 @@ export default function App() {
    */
   const isOpeningFilePickerRef = useRef(false);
 
+  /**
+   * Chrome freeze mitigation (dialog close):
+   * When the OS file picker closes (especially on cancel), Chrome can emit a burst of
+   * focus/mouse events. If our UI responds by imperatively mutating styles on large containers
+   * (onMouseEnter/onMouseLeave) and running layout-affecting transitions, it can trigger
+   * layout thrash that *looks like a browser hang*.
+   *
+   * Strategy: while the dialog is open (and for a short cooldown after focus returns),
+   * we temporarily disable hover-driven style mutations.
+   */
+  const fileDialogActiveRef = useRef(false);
+  const fileDialogCooldownUntilRef = useRef<number>(0);
+  const FILE_DIALOG_COOLDOWN_MS = 650;
+
+  useEffect(() => {
+    const onWindowFocus = () => {
+      // If we previously opened a dialog, treat focus return as dialog close.
+      if (!fileDialogActiveRef.current) return;
+      fileDialogActiveRef.current = false;
+      fileDialogCooldownUntilRef.current = Date.now() + FILE_DIALOG_COOLDOWN_MS;
+    };
+
+    window.addEventListener('focus', onWindowFocus);
+    return () => {
+      window.removeEventListener('focus', onWindowFocus);
+    };
+  }, []);
+
+  const shouldAllowHoverEffects = useCallback((): boolean => {
+    if (fileDialogActiveRef.current) return false;
+    if (Date.now() < fileDialogCooldownUntilRef.current) return false;
+    return true;
+  }, []);
+
   const openHiddenFileInput = useCallback(
     (inputRef: React.RefObject<HTMLInputElement>, e?: React.SyntheticEvent) => {
       /**
@@ -380,6 +414,9 @@ export default function App() {
        *   focus/click side-effects and produce an event storm (appears like a hang).
        * - Deferring the actual click to the next tick breaks same-stack recursion while
        *   preserving the "user gesture" in practice for file dialogs.
+       *
+       * Additional mitigation:
+       * - Mark dialog as active so we can suppress hover/layout effects until focus returns.
        */
       if (e) {
         e.preventDefault();
@@ -394,6 +431,9 @@ export default function App() {
       if (isOpeningFilePickerRef.current) return;
       isOpeningFilePickerRef.current = true;
 
+      // Mark dialog as active immediately (before we defer click()).
+      fileDialogActiveRef.current = true;
+
       try {
         // Break synchronous focus/click recursion by deferring to the next tick.
         setTimeout(() => {
@@ -405,6 +445,17 @@ export default function App() {
         setTimeout(() => {
           isOpeningFilePickerRef.current = false;
         }, 1000);
+
+        /**
+         * Fallback: if the browser doesn't emit focus (edge cases), still release "active"
+         * after a reasonable window so the UI doesn't remain in a hover-disabled state.
+         */
+        setTimeout(() => {
+          if (fileDialogActiveRef.current) {
+            fileDialogActiveRef.current = false;
+            fileDialogCooldownUntilRef.current = Date.now() + FILE_DIALOG_COOLDOWN_MS;
+          }
+        }, 4000);
       }
     },
     []
@@ -1345,10 +1396,12 @@ export default function App() {
               }}
               // Important: no onClick on this outer wrapper. Only the intended dropzone triggers the file picker.
               onMouseEnter={(e) => {
+                if (!shouldAllowHoverEffects()) return;
                 e.currentTarget.style.border = '1px solid #14B8A6';
                 e.currentTarget.style.boxShadow = '0px 6px 16px rgba(20, 184, 166, 0.15)';
               }}
               onMouseLeave={(e) => {
+                if (!shouldAllowHoverEffects()) return;
                 e.currentTarget.style.border = '1px solid rgba(20, 184, 166, 0.3)';
                 e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
               }}
@@ -1561,10 +1614,12 @@ export default function App() {
                     border: '1px solid rgba(20, 184, 166, 0.3)',
                   }}
                   onMouseEnter={(e) => {
+                    if (!shouldAllowHoverEffects()) return;
                     e.currentTarget.style.border = '1px solid #14B8A6';
                     e.currentTarget.style.boxShadow = '0px 6px 16px rgba(20, 184, 166, 0.15)';
                   }}
                   onMouseLeave={(e) => {
+                    if (!shouldAllowHoverEffects()) return;
                     e.currentTarget.style.border = '1px solid rgba(20, 184, 166, 0.3)';
                     e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
                   }}
@@ -1717,10 +1772,12 @@ export default function App() {
                       border: '1px solid rgba(20, 184, 166, 0.3)',
                     }}
                     onMouseEnter={(e) => {
+                      if (!shouldAllowHoverEffects()) return;
                       e.currentTarget.style.border = '1px solid #14B8A6';
                       e.currentTarget.style.boxShadow = '0px 6px 16px rgba(20, 184, 166, 0.15)';
                     }}
                     onMouseLeave={(e) => {
+                      if (!shouldAllowHoverEffects()) return;
                       e.currentTarget.style.border = '1px solid rgba(20, 184, 166, 0.3)';
                       e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
                     }}
@@ -2283,9 +2340,11 @@ export default function App() {
                 border: '1px solid rgba(20, 184, 166, 0.3)',
               }}
               onMouseEnter={(e) => {
+                if (!shouldAllowHoverEffects()) return;
                 e.currentTarget.style.boxShadow = '0px 8px 20px rgba(20, 184, 166, 0.2)';
               }}
               onMouseLeave={(e) => {
+                if (!shouldAllowHoverEffects()) return;
                 e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
               }}
             >
