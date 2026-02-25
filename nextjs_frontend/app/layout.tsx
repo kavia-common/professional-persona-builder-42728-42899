@@ -1,4 +1,12 @@
 import type { Metadata } from 'next';
+
+/**
+ * Global CSS entrypoint.
+ *
+ * IMPORTANT: This must import a single stylesheet that registers Tailwind layers
+ * (`@tailwind base/components/utilities`) before importing any file that uses
+ * `@layer base` (e.g. theme.css), otherwise Tailwind compilation can fail.
+ */
 import '../src/styles/index.css';
 
 export const metadata: Metadata = {

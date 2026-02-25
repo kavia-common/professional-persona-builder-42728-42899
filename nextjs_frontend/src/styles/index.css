@@ -2,16 +2,16 @@
   Global stylesheet entrypoint.
 
   IMPORTANT:
-  Tailwind layer directives must be registered before any files that use
-  `@layer base` (e.g. theme.css). Some build pipelines inline/reorder CSS
-  imports; placing `@tailwind base/components/utilities` here guarantees the
-  layers exist before theme.css is processed.
+  - Tailwind layer directives MUST come first.
+  - Any file using `@layer base` (e.g. theme.css) MUST be imported only after
+    `@tailwind base` is declared, otherwise Tailwind will error during build.
 */
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* Project globals */
 @import './fonts.css';
 @import './theme.css';
 
