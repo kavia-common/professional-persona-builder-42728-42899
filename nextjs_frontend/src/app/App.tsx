@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Upload, Loader2, X, Edit3, Plus, CheckCircle2, Camera, Award, Compass } from 'lucide-react';
 import {
+  generateDraftForBuild,
   getBuildStatus,
   listPersonaVersions,
   orchestrationRunAll,
@@ -899,6 +900,69 @@ export default function App() {
     setIsEditable(false);
   };
 
+  // PUBLIC_INTERFACE
+  const handleRegenerateDraft = useCallback(async () => {
+    /**
+     * Re-generates the draft persona for the current build.
+     *
+     * Behavior:
+     * - If we have a buildId, call POST /orchestration/builds/{id}/generate-draft to regenerate the draft.
+     * - Transition UI to "processing" so polling + artifact refresh behaves consistently.
+     * - Clear edit state and version list so the user sees the new draft cleanly.
+     */
+    if (!buildId) {
+      setBackendError('No build available to regenerate. Please generate a draft persona first.');
+      return;
+    }
+
+    const generationId = ++generationIdRef.current;
+
+    // Allow a new artifact payload to be applied once it arrives.
+    lastAppliedPersonaArtifactFingerprintRef.current = {};
+    lastAppliedPersonaUiFingerprintRef.current = {};
+
+    setHasError(false);
+    setBackendError('');
+    setVersionsError('');
+    setVersions([]);
+    setIsEditable(false);
+    setHasUnsavedChanges(false);
+
+    try {
+      setState('processing');
+
+      // Best-effort regenerate; backend may complete immediately or via build polling.
+      const resp = await generateDraftForBuild({
+        buildId,
+        personaId: personaId ?? undefined,
+        saveDraft: true,
+        createVersion: true,
+      });
+
+      // eslint-disable-next-line no-console
+      console.log(`[draft][regen:${generationId}] generateDraftForBuild response:`, resp);
+
+      setPersonaId(resp.personaId ?? null);
+
+      // If the backend already has build as succeeded, we can move straight to draft view.
+      // Otherwise, polling will carry us to draft once the build status flips.
+      if (buildStatus?.status === 'succeeded') {
+        setState('draft');
+      }
+    } catch (e: any) {
+      const payloadMsg =
+        e?.payload && typeof e.payload === 'object' && e.payload !== null ? e.payload?.message || e.payload?.error : null;
+
+      const message = payloadMsg || e?.message || 'Failed to regenerate the draft persona.';
+      // eslint-disable-next-line no-console
+      console.error(`[draft][regen:${generationId}] regenerate failed`, { message, error: e });
+
+      setBackendError(message);
+      setHasError(true);
+      setState('processing');
+    }
+  }, [buildId, personaId, buildStatus?.status]);
+
   async function refreshVersions(id: UUID) {
     setIsLoadingVersions(true);
     setVersionsError('');
@@ -1367,49 +1431,32 @@ export default function App() {
             <div className="flex flex-col">
               <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', margin: 0 }}>Career Navigator</h1>
 
-              {/* Per request: remove "Your Profile" label; show initials + full name + role */}
-              <div className="flex items-center gap-2" style={{ marginTop: '6px' }}>
-                <div
-                  className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0"
+              {/* User name + role (no icon/initials chip) */}
+              <div className="min-w-0 flex flex-col" style={{ marginTop: '6px' }}>
+                <span
                   style={{
-                    backgroundColor: 'rgba(20, 184, 166, 0.12)',
-                    border: '1px solid rgba(20, 184, 166, 0.35)',
-                    color: '#0F766E',
                     fontSize: '12px',
-                    fontWeight: 700,
+                    color: '#111827',
+                    fontWeight: 600,
+                    lineHeight: '1.1',
                   }}
-                  aria-label="User initials"
-                  title={personaName || 'User'}
+                  className="truncate"
+                  title={personaName || '—'}
                 >
-                  {avatarInitials}
-                </div>
-
-                <div className="min-w-0 flex flex-col">
-                  <span
-                    style={{
-                      fontSize: '12px',
-                      color: '#111827',
-                      fontWeight: 600,
-                      lineHeight: '1.1',
-                    }}
-                    className="truncate"
-                    title={personaName || '—'}
-                  >
-                    {personaName || '—'}
-                  </span>
-                  <span
-                    style={{
-                      fontSize: '12px',
-                      color: '#6B7280',
-                      fontWeight: 500,
-                      lineHeight: '1.1',
-                    }}
-                    className="truncate"
-                    title={personaTitle || ''}
-                  >
-                    {personaTitle || ''}
-                  </span>
-                </div>
+                  {personaName || '—'}
+                </span>
+                <span
+                  style={{
+                    fontSize: '12px',
+                    color: '#6B7280',
+                    fontWeight: 500,
+                    lineHeight: '1.1',
+                  }}
+                  className="truncate"
+                  title={personaTitle || ''}
+                >
+                  {personaTitle || ''}
+                </span>
               </div>
             </div>
           </div>
@@ -1937,7 +1984,7 @@ export default function App() {
                   {state === 'draft' && (
                     <div className="mb-2">
                       <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '10px' }}>
-                        Version History
+                        History
                       </h4>
 
                       {isLoadingVersions ? (
@@ -1955,7 +2002,7 @@ export default function App() {
                         <div className="space-y-2">
                           {versions.slice(0, 5).map((v) => (
                             <div key={v.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
-                              <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>v{v.version}</div>
+                              <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>{v.version}</div>
                               <div style={{ fontSize: '12px', color: '#6B7280' }}>
                                 {new Date(v.createdAt).toLocaleString()}
                               </div>
@@ -2055,10 +2102,7 @@ export default function App() {
                       {/* Requested: Finalize/Discard available BEFORE saving changes */}
                       <div className="flex flex-wrap items-center gap-2 justify-end">
                         <button
-                          onClick={() => {
-                            setIsEditable(false);
-                            setHasUnsavedChanges(false);
-                          }}
+                          onClick={handleRegenerateDraft}
                           className="rounded-lg transition-colors"
                           style={{
                             padding: '8px 14px',
@@ -2069,7 +2113,7 @@ export default function App() {
                             fontWeight: 500,
                           }}
                         >
-                          Discard Draft
+                          Regenerate Draft
                         </button>
 
                         <button
@@ -2250,7 +2294,7 @@ export default function App() {
                             fontWeight: 500,
                           }}
                         >
-                          AI Generated
+                          Draft
                         </span>
                       </div>
                       {isEditable ? (
@@ -2756,7 +2800,7 @@ export default function App() {
 
               {/* Version history (finalized) */}
               <div>
-                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Version History</h4>
+                <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>History</h4>
 
                 {isLoadingVersions ? (
                   <div className="flex items-center gap-2" style={{ color: '#6B7280', fontSize: '13px' }}>
@@ -2771,7 +2815,7 @@ export default function App() {
                   <div className="space-y-2">
                     {versions.slice(0, 10).map((v) => (
                       <div key={v.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
-                        <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>v{v.version}</div>
+                        <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>{v.version}</div>
                         <div style={{ fontSize: '12px', color: '#6B7280' }}>{new Date(v.createdAt).toLocaleString()}</div>
                       </div>
                     ))}
