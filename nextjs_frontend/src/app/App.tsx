@@ -179,17 +179,42 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
     ['artifacts', 'draft', 'personaJson'],
     ['artifacts', 'final'],
     ['artifacts', 'draft'],
-    ['finalPersona'],
-    ['final'],
+
+    /**
+     * IMPORTANT:
+     * OrchestrationRecord is "additionalProperties: true" in OpenAPI and may evolve.
+     * In some scaffold/placeholder implementations, the generated persona is stored at the
+     * top-level (not under artifacts).
+     *
+     * Add common non-artifacts candidates so the Draft Persona UI still populates.
+     */
     ['draftPersona'],
+    ['draftPersona', 'persona'],
+    ['draftPersona', 'draft'],
+    ['draftPersona', 'personaJson'],
+    ['personaDraft'],
+    ['personaDraft', 'persona'],
+    ['personaDraft', 'draft'],
+    ['personaDraft', 'personaJson'],
     ['draft'],
-
-    // Orchestration run-all response "results" (may be the actual persona draft)
-    ['results', 'generate', 'persona'],
-
-    // Other legacy fallbacks
-    ['results', 'finalize', 'final'],
+    ['draft', 'persona'],
+    ['draft', 'personaJson'],
     ['persona'],
+    ['persona', 'personaJson'],
+
+    // Final variants at top-level (defensive)
+    ['finalPersona'],
+    ['finalPersona', 'final'],
+    ['finalPersona', 'persona'],
+    ['finalPersona', 'personaJson'],
+    ['final'],
+    ['final', 'personaJson'],
+
+    // Orchestration run-all response "results" (some versions embed the persona here)
+    ['results', 'generate', 'persona'],
+    ['results', 'generate', 'draftPersona'],
+    ['results', 'generate', 'personaDraft'],
+    ['results', 'finalize', 'final'],
   ];
 
   const looksLikePersona = (value: any): boolean => {
@@ -1023,7 +1048,14 @@ export default function App() {
         });
 
         // Only proceed if personaJson is a real object with keys
-        if (!personaJson || typeof personaJson !== 'object' || Object.keys(personaJson).length === 0) return;
+        if (!personaJson || typeof personaJson !== 'object' || Object.keys(personaJson).length === 0) {
+          // eslint-disable-next-line no-console
+          console.warn(`[persona][extract][gen:${generationId}] no persona payload found in orchestration record`, {
+            buildId,
+            sourcePath,
+          });
+          return;
+        }
 
         const artifactFingerprint = fingerprintPersonaArtifact(personaJson);
 
