@@ -151,8 +151,12 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
    */
   const candidates: Array<Array<string>> = [
     // Most likely canonical locations (PRIORITY ORDER MATTERS)
-    // Per user_input_ref: backend is sending draft persona under artifacts.draftPersona.
+    // Per attached user_input_ref: persona draft may be nested directly at these artifact locations.
     ['artifacts', 'draftPersona'],
+    ['artifacts', 'output'],
+    ['artifacts', 'result'],
+
+    // Other known/observed locations
     ['artifacts', 'output', 'personaJson'],
     ['artifacts', 'finalPersona'],
 
@@ -783,6 +787,15 @@ export default function App() {
 
         const extracted = extractPersonaJsonFromOrchestrationRecord(orch);
         const personaJson = extracted.personaJson;
+
+        // Ensure logs show a non-null sourcePath when ANY candidate exists.
+        // This helps quickly confirm the UI is "seeing" data even if coercion rejects it later.
+        if (personaJson !== null && extracted.sourcePath === null) {
+          // eslint-disable-next-line no-console
+          console.warn(`[artifacts][gen:${generationId}] personaJson exists but sourcePath is null (unexpected)`, {
+            personaJsonType: Array.isArray(personaJson) ? 'array' : typeof personaJson,
+          });
+        }
 
         // Small preview (avoid dumping huge payloads).
         const preview =
