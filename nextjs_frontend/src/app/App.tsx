@@ -364,8 +364,6 @@ export default function App() {
        * This is shared across all file pickers (primary upload, add-more, profile image).
        */
       if (e) {
-        // Ensure we don't bubble into any parent handlers (present or future).
-        // Also prevent default to avoid unintended form/button behaviors.
         e.preventDefault();
         e.stopPropagation();
       }
@@ -374,18 +372,17 @@ export default function App() {
       const nativeEvent = (e as any)?.nativeEvent as Event | undefined;
       if (nativeEvent && 'isTrusted' in nativeEvent && !(nativeEvent as any).isTrusted) return;
 
-      // Re-entrancy guard: if we are already opening, bail.
+      // If we're already processing a click, ignore all subsequent ones for 1 full second
       if (isOpeningFilePickerRef.current) return;
       isOpeningFilePickerRef.current = true;
 
       try {
         inputRef.current?.click();
       } finally {
-        // Release after 500ms (instead of 0ms) to let the OS file dialog stabilize.
-        // This reduces the chance of rapid double-clicks or re-entrant events that can hang Chrome.
+        // Increase lockout to 1000ms to allow the OS file dialog to "take over"
         setTimeout(() => {
           isOpeningFilePickerRef.current = false;
-        }, 500);
+        }, 1000);
       }
     },
     []
@@ -807,7 +804,8 @@ export default function App() {
 
         const { personaJson } = extractPersonaJsonFromOrchestrationRecord(orch);
 
-        if (personaJson && isNonEmptyObject(personaJson)) {
+        // Only proceed if we have a real object with keys
+        if (personaJson && typeof personaJson === 'object' && Object.keys(personaJson).length > 0) {
           const artifactJson = safeJsonStringify(personaJson);
 
           // Double-gate circuit breaker:
@@ -1098,9 +1096,12 @@ export default function App() {
               }}
             >
               <motion.span
-                layoutId="underline"
-                animate={state === 'processing' ? { opacity: 0.5 } : { opacity: 1 }}
                 className="upload-heading-underline"
+                initial={{ width: 0 }}
+                animate={{ width: '100%' }}
+                transition={{ duration: 0.5, ease: 'easeOut' }}
+                // Ensure it doesn't re-animate on every state change
+                key="static-underline"
               >
                 View Current State Persona
               </motion.span>
@@ -1114,7 +1115,13 @@ export default function App() {
               multiple
               accept=".pdf,.docx,.txt"
               onChange={handleFileChange}
-              style={{ display: 'none', position: 'absolute', pointerEvents: 'none' }}
+              /* STYLES TO PREVENT LAYOUT SHIFT: */
+              style={{
+                display: 'none',
+                position: 'fixed',
+                top: '-1000px',
+                left: '-1000px',
+              }}
               tabIndex={-1}
             />
 
