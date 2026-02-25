@@ -352,36 +352,52 @@ export default function App() {
    * Guard against re-entrant file-picker triggering.
    * In some browser/DOM combinations, calling input.click() can synchronously trigger focus/click
    * side-effects that re-enter handlers, producing an event storm that looks like a “freeze”.
+   *
+   * Important: we use ONE guard for all hidden file inputs so multiple buttons can't race.
    */
   const isOpeningFilePickerRef = useRef(false);
 
+  const openHiddenFileInput = useCallback(
+    (inputRef: React.RefObject<HTMLInputElement>, e?: React.SyntheticEvent) => {
+      /**
+       * Opens a hidden <input type="file"> in a safe, non-reentrant way.
+       * This is shared across all file pickers (primary upload, add-more, profile image).
+       */
+      if (e) {
+        // Ensure we don't bubble into any parent handlers (present or future).
+        // Also prevent default to avoid unintended form/button behaviors.
+        e.preventDefault();
+        e.stopPropagation();
+      }
+
+      // Only allow user-initiated events to open the picker (defensive).
+      const nativeEvent = (e as any)?.nativeEvent as Event | undefined;
+      if (nativeEvent && 'isTrusted' in nativeEvent && !(nativeEvent as any).isTrusted) return;
+
+      // Re-entrancy guard: if we are already opening, bail.
+      if (isOpeningFilePickerRef.current) return;
+      isOpeningFilePickerRef.current = true;
+
+      try {
+        inputRef.current?.click();
+      } finally {
+        // Release on next macrotask to avoid same-tick re-entry.
+        setTimeout(() => {
+          isOpeningFilePickerRef.current = false;
+        }, 0);
+      }
+    },
+    []
+  );
+
   // PUBLIC_INTERFACE
-  const openFilePicker = useCallback((e?: React.SyntheticEvent) => {
-    /** Opens the hidden primary upload <input type="file"> in a safe, non-reentrant way. */
-    if (e) {
-      // Ensure we don't bubble into any parent handlers (present or future).
-      // Also prevent default to avoid unintended form/button behaviors.
-      e.preventDefault();
-      e.stopPropagation();
-    }
-
-    // Only allow user-initiated events to open the picker (defensive).
-    const nativeEvent = (e as any)?.nativeEvent as Event | undefined;
-    if (nativeEvent && 'isTrusted' in nativeEvent && !(nativeEvent as any).isTrusted) return;
-
-    // Re-entrancy guard: if we are already opening, bail.
-    if (isOpeningFilePickerRef.current) return;
-    isOpeningFilePickerRef.current = true;
-
-    try {
-      fileInputRef.current?.click();
-    } finally {
-      // Release on next macrotask to avoid same-tick re-entry.
-      setTimeout(() => {
-        isOpeningFilePickerRef.current = false;
-      }, 0);
-    }
-  }, []);
+  const openFilePicker = useCallback(
+    (e?: React.SyntheticEvent) => {
+      /** Opens the hidden primary upload <input type="file"> in a safe, non-reentrant way. */
+      openHiddenFileInput(fileInputRef, e);
+    },
+    [openHiddenFileInput]
+  );
 
   // Helps correlate logs across multiple async flows; increments per draft generation.
   const generationIdRef = useRef<number>(0);
@@ -1425,7 +1441,7 @@ export default function App() {
                         <>
                           <input ref={additionalFileInputRef} type="file" accept=".pdf,.docx,.txt" multiple onChange={handleFileChange} className="hidden" />
                           <button
-                            onClick={() => additionalFileInputRef.current?.click()}
+                            onClick={(e) => openHiddenFileInput(additionalFileInputRef, e)}
                             className="w-full flex items-center justify-center gap-2 rounded-lg border-2 border-dashed p-3 transition-colors hover:bg-gray-50"
                             style={{
                               borderColor: '#D1D5DB',
@@ -1556,7 +1572,7 @@ export default function App() {
                         )}
                         {isEditable && (
                           <button
-                            onClick={() => profileImageInputRef.current?.click()}
+                            onClick={(e) => openHiddenFileInput(profileImageInputRef, e)}
                             className="absolute inset-0 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                             style={{
                               backgroundColor: 'rgba(0, 0, 0, 0.5)',
