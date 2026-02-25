@@ -739,18 +739,21 @@ export default function App() {
   useEffect(() => {
     if (!buildId || state !== 'draft' || hasError) return;
 
-    // Use a local flag to prevent multiple overlapping async calls
-    let isFetching = false;
+    /**
+     * Ignore/unmount guard:
+     * - prevents setState after unmount
+     * - prevents applying results from an older effect instance after deps change
+     */
+    let isIgnore = false;
 
     const generationId = generationIdRef.current;
 
-    const fetchArtifacts = async () => {
-      if (isFetching) return;
-      isFetching = true;
-
+    const loadData = async () => {
       try {
         const { getOrchestrationByBuild } = await import('../lib/apiClient');
         const orch = await getOrchestrationByBuild(buildId);
+        if (isIgnore) return;
+
         const { personaJson } = extractPersonaJsonFromOrchestrationRecord(orch);
 
         if (personaJson && isNonEmptyObject(personaJson)) {
@@ -771,15 +774,14 @@ export default function App() {
         // best-effort only; ignore, but log for diagnostics
         // eslint-disable-next-line no-console
         console.error(`[artifacts][gen:${generationId}] artifact fetch failed`, err);
-      } finally {
-        isFetching = false;
       }
     };
 
-    fetchArtifacts();
+    loadData();
 
-    // ONLY depend on buildId and state.
-    // DO NOT add personaData here or it will loop.
+    return () => {
+      isIgnore = true;
+    };
   }, [buildId, state, hasError]);
 
   // Load versions whenever personaId becomes available.
