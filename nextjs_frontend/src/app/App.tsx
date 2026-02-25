@@ -96,33 +96,82 @@ function getInitials(label: string): string {
   return initials || '•';
 }
 
-function inferDraftFromOrchestrationRecord(orch: any): any | null {
+function getNestedOrchestrationValue(
+  root: any,
+  path: Array<string | number>
+): { value: any; foundPath: string } | null {
   /**
-   * Best-effort extraction of persona JSON from orchestration record.
-   *
-   * Prefer FINAL persona if present (so UI mirrors backend "finalized" artifacts),
-   * otherwise fall back to DRAFT persona.
-   *
-   * OrchestrationRecord is additionalProperties=true so we must be defensive.
+   * Safe nested accessor that returns both the value and the dot-path used.
+   * This supports debugging cases where orchestration responses evolve shape.
    */
-  const maybeFinal =
-    orch?.finalPersona ||
-    orch?.final ||
-    orch?.artifacts?.final ||
-    orch?.artifacts?.personaFinal ||
-    orch?.results?.finalize?.final;
+  let cur: any = root;
+  for (const seg of path) {
+    if (cur === null || cur === undefined) return null;
+    cur = cur[seg as any];
+  }
+  return { value: cur, foundPath: path.join('.') };
+}
 
-  if (maybeFinal) return maybeFinal;
+function logAvailableKeys(label: string, obj: any) {
+  /**
+   * Log keys (and top-level nested "artifacts" keys when present) to help debug
+   * mismatched orchestration payload shapes without dumping huge JSON blobs.
+   */
+  try {
+    const topKeys = isNonEmptyObject(obj) ? Object.keys(obj) : [];
+    const artifactsKeys = isNonEmptyObject(obj?.artifacts) ? Object.keys(obj.artifacts as any) : [];
+    const outputKeys = isNonEmptyObject(obj?.artifacts?.output) ? Object.keys((obj.artifacts as any).output) : [];
+    // eslint-disable-next-line no-console
+    console.log(`${label} available keys:`, {
+      topKeys,
+      artifactsKeys,
+      outputKeys,
+      hasArtifacts: Boolean(obj?.artifacts),
+      hasArtifactsOutput: Boolean(obj?.artifacts?.output),
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`${label} available keys logging failed`, e);
+  }
+}
 
-  const maybeDraft =
-    orch?.draftPersona ||
-    orch?.draft ||
-    orch?.artifacts?.draft ||
-    orch?.artifacts?.personaDraft ||
-    orch?.results?.generate?.persona ||
-    orch?.persona;
+function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: any | null; sourcePath: string | null } {
+  /**
+   * PUBLIC_INTERFACE
+   * Extract persona JSON from the orchestration record.
+   *
+   * Requirement: orchestration response may store persona JSON under:
+   *   artifacts.output.personaJson
+   * plus some legacy/alternate locations.
+   *
+   * We also prefer final persona when present, else draft.
+   */
+  const candidates: Array<Array<string>> = [
+    // REQUIRED by task (exact new location)
+    ['artifacts', 'output', 'personaJson'],
 
-  return maybeDraft ?? null;
+    // Additional observed/legacy possibilities (keep these for robustness)
+    ['artifacts', 'personaJson'],
+    ['artifacts', 'final', 'personaJson'],
+    ['artifacts', 'draft', 'personaJson'],
+    ['artifacts', 'final'],
+    ['artifacts', 'draft'],
+    ['finalPersona'],
+    ['final'],
+    ['draftPersona'],
+    ['draft'],
+    ['results', 'finalize', 'final'],
+    ['results', 'generate', 'persona'],
+    ['persona'],
+  ];
+
+  for (const path of candidates) {
+    const hit = getNestedOrchestrationValue(orch, path);
+    if (hit?.value !== undefined && hit?.value !== null) {
+      return { personaJson: hit.value, sourcePath: hit.foundPath };
+    }
+  }
+  return { personaJson: null, sourcePath: null };
 }
 
 function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaData): PersonaData {
@@ -622,6 +671,15 @@ export default function App() {
     // IMPORTANT: keep dependencies primitive to avoid object-identity loops.
   }, [buildId, state, hasError]);
 
+  /**
+   * Prevent render loops from repeated artifact fetches:
+   * - Some backends may return a fresh object identity on each call.
+   * - Even with JSON diff against PersonaData, any subtle normalization differences can cause churn.
+   *
+   * We track a hash of the *raw extracted personaJson* per buildId and skip work if unchanged.
+   */
+  const lastAppliedPersonaArtifactJsonRef = useRef<Record<string, string>>({});
+
   // When we enter draft state, attempt to fetch orchestration artifacts and populate UI persona (best-effort).
   useEffect(() => {
     if (!buildId) return;
@@ -643,44 +701,61 @@ export default function App() {
         const orch = await getOrchestrationByBuild(buildId);
 
         console.log(`[getOrchestrationByBuild][gen:${generationId}] response:`, orch);
-
         console.log(`[artifacts][gen:${generationId}] getOrchestrationByBuild raw response:`, orch);
+
+        // Key-logging requested in task (helps debug where persona draft actually lives).
+        logAvailableKeys(`[artifacts][gen:${generationId}] orchestration`, orch);
 
         if (cancelled || !isMountedRef.current) return;
 
-        const maybeDraft = inferDraftFromOrchestrationRecord(orch);
+        const extracted = extractPersonaJsonFromOrchestrationRecord(orch);
+        const personaJson = extracted.personaJson;
 
-        if (!maybeDraft) {
+        console.log(`[artifacts][gen:${generationId}] extracted personaJson`, {
+          sourcePath: extracted.sourcePath,
+          personaJsonType: personaJson === null ? 'null' : Array.isArray(personaJson) ? 'array' : typeof personaJson,
+        });
+
+        if (!personaJson) {
           console.warn(
-            `[artifacts][gen:${generationId}] no draft persona found in orchestration record; UI will keep fallback personaData. orch keys=`,
-            isNonEmptyObject(orch) ? Object.keys(orch) : typeof orch,
-            'orch=',
-            orch
+            `[artifacts][gen:${generationId}] no personaJson found in orchestration record; UI will keep fallback personaData. sourcePath=`,
+            extracted.sourcePath,
+            'orch keys=',
+            isNonEmptyObject(orch) ? Object.keys(orch) : typeof orch
           );
           return;
         }
 
-        // Guard: ensure we have a plausible object to coerce. (PersonaDraft should be object)
-        if (!isNonEmptyObject(maybeDraft)) {
+        // Guard: ensure we have a plausible object to coerce.
+        if (!isNonEmptyObject(personaJson)) {
           console.warn(
-            `[artifacts][gen:${generationId}] draft persona found but is empty/non-object; ignoring to prevent flicker/reversion`,
-            { maybeDraftType: typeof maybeDraft, maybeDraft }
+            `[artifacts][gen:${generationId}] personaJson found but is empty/non-object; ignoring to prevent flicker/reversion`,
+            { sourcePath: extracted.sourcePath, personaJsonType: typeof personaJson, personaJson }
           );
           return;
         }
 
-        console.log(`[artifacts][gen:${generationId}] draft persona extracted (pre-coerce):`, maybeDraft);
+        // Raw-artifact JSON guard (per build) to avoid repeated coercion/setState when backend returns same payload.
+        const artifactJson = safeJsonStringify(personaJson);
+        const lastJson = lastAppliedPersonaArtifactJsonRef.current[buildId] ?? '';
+        if (artifactJson === lastJson) {
+          console.log(
+            `[artifacts][gen:${generationId}] persona artifact unchanged for build; skipping coercion + setPersonaData to avoid loops`,
+            { buildId, sourcePath: extracted.sourcePath }
+          );
+          return;
+        }
+        lastAppliedPersonaArtifactJsonRef.current[buildId] = artifactJson;
+
+        console.log(`[artifacts][gen:${generationId}] personaJson extracted (pre-coerce):`, personaJson);
 
         setPersonaData((prev) => {
           /**
-           * Render-loop freeze fix (per user request):
-           * Only update state if the incoming data is actually different.
-           *
-           * We stringify for a pragmatic deep compare because the backend artifact object
-           * can change identity even when meaningfully identical.
+           * Render-loop freeze fix:
+           * Only update state if the computed PersonaData is meaningfully different.
            */
           const current = prev ?? initialPersonaFallback;
-          const coerced = coercePersonaDataFromBackendJson(maybeDraft, current);
+          const coerced = coercePersonaDataFromBackendJson(personaJson, current);
 
           const prevJson = safeJsonStringify(current);
           const nextJson = safeJsonStringify(coerced);
@@ -712,7 +787,11 @@ export default function App() {
 
   // Load versions whenever personaId becomes available.
   useEffect(() => {
-    if (!personaId) return;
+    // Guard: avoid backend 400s from undefined/empty IDs.
+    if (!personaId || typeof personaId !== 'string' || personaId.trim().length === 0) {
+      console.log('[versions] personaId not available yet; skipping versions fetch', { personaId });
+      return;
+    }
     refreshVersions(personaId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [personaId]);
