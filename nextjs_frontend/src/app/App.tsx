@@ -793,6 +793,9 @@ export default function App() {
   const lastAppliedPersonaUiFingerprintRef = useRef<Record<string, string>>({});
   const isApplyingArtifactsRef = useRef<Record<string, boolean>>({});
 
+  // Diagnostics: track which sourcePath was used per build to correlate logs with UI state.
+  const lastAppliedPersonaSourcePathRef = useRef<Record<string, string>>({});
+
   const personaDataRef = useRef<PersonaData>(initialPersonaFallback);
   useEffect(() => {
     personaDataRef.current = personaData;
@@ -873,7 +876,27 @@ export default function App() {
         const orch = await getOrchestrationByBuild(buildId);
         if (isIgnore) return;
 
-        const { personaJson } = extractPersonaJsonFromOrchestrationRecord(orch);
+        // Minimal, structured diagnostics to explain "sourcePath: null" situations.
+        logAvailableKeys(`[artifacts][gen:${generationId}] orchestration`, orch);
+
+        const { personaJson, sourcePath } = extractPersonaJsonFromOrchestrationRecord(orch);
+
+        // eslint-disable-next-line no-console
+        console.log(`[persona][extract][gen:${generationId}] selected`, {
+          buildId,
+          sourcePath,
+          personaType: Array.isArray(personaJson) ? 'array' : typeof personaJson,
+          personaKeys: isNonEmptyObject(personaJson) ? Object.keys(personaJson) : [],
+          personaPreview: (() => {
+            try {
+              // Keep preview small to avoid console lockups.
+              const s = JSON.stringify(personaJson);
+              return s.length > 800 ? `${s.slice(0, 800)}…(truncated)` : s;
+            } catch {
+              return String(personaJson);
+            }
+          })(),
+        });
 
         // Only proceed if personaJson is a real object with keys
         if (!personaJson || typeof personaJson !== 'object' || Object.keys(personaJson).length === 0) return;
@@ -892,12 +915,14 @@ export default function App() {
         // but still remember we've seen this artifact payload.
         if (nextUiFingerprint === lastAppliedPersonaUiFingerprintRef.current[buildId]) {
           lastAppliedPersonaArtifactFingerprintRef.current[buildId] = artifactFingerprint;
+          if (sourcePath) lastAppliedPersonaSourcePathRef.current[buildId] = sourcePath;
           return;
         }
 
         // Commit: update refs first (idempotent), then setState once.
         lastAppliedPersonaArtifactFingerprintRef.current[buildId] = artifactFingerprint;
         lastAppliedPersonaUiFingerprintRef.current[buildId] = nextUiFingerprint;
+        if (sourcePath) lastAppliedPersonaSourcePathRef.current[buildId] = sourcePath;
 
         if (!isIgnore && isMountedRef.current) {
           setPersonaData(next);
@@ -912,6 +937,93 @@ export default function App() {
     };
 
     loadData();
+
+    return () => {
+      isIgnore = true;
+    };
+  }, [buildId, state, hasError]);
+
+  /**
+   * When we enter finalized state, attempt to apply the backend "final" persona if present.
+   * This keeps the finalized view consistent with backend artifacts (if /finalize was run server-side).
+   *
+   * NOTE: This is best-effort and uses the same fingerprint gates as draft, so it will not
+   * introduce render loops or upload-click freeze regressions.
+   */
+  useEffect(() => {
+    if (!buildId || state !== 'finalized' || hasError) return;
+
+    if (isApplyingArtifactsRef.current[buildId]) return;
+
+    let isIgnore = false;
+    const generationId = generationIdRef.current;
+
+    const loadFinal = async () => {
+      isApplyingArtifactsRef.current[buildId] = true;
+      try {
+        const { getOrchestrationByBuild } = await import('../lib/apiClient');
+        const orch = await getOrchestrationByBuild(buildId);
+        if (isIgnore) return;
+
+        logAvailableKeys(`[final][gen:${generationId}] orchestration`, orch);
+
+        // Prefer explicit final fields if present; otherwise fall back to the generic extractor.
+        const preferredFinalPaths: Array<Array<string>> = [
+          ['artifacts', 'finalPersona'],
+          ['artifacts', 'final'],
+          ['results', 'finalize', 'final'],
+        ];
+
+        let finalHit: { personaJson: any; sourcePath: string } | null = null;
+        for (const path of preferredFinalPaths) {
+          const hit = getNestedOrchestrationValue(orch, path);
+          if (hit?.value !== undefined && hit?.value !== null) {
+            finalHit = { personaJson: hit.value, sourcePath: hit.foundPath };
+            break;
+          }
+        }
+
+        const extracted = finalHit ?? extractPersonaJsonFromOrchestrationRecord(orch);
+        const personaJson = extracted.personaJson;
+        const sourcePath = (extracted as any).sourcePath ?? null;
+
+        // eslint-disable-next-line no-console
+        console.log(`[persona][final-extract][gen:${generationId}] selected`, {
+          buildId,
+          sourcePath,
+          personaType: Array.isArray(personaJson) ? 'array' : typeof personaJson,
+          personaKeys: isNonEmptyObject(personaJson) ? Object.keys(personaJson) : [],
+        });
+
+        if (!personaJson || typeof personaJson !== 'object' || Object.keys(personaJson).length === 0) return;
+
+        const artifactFingerprint = fingerprintPersonaArtifact(personaJson);
+        if (artifactFingerprint === lastAppliedPersonaArtifactFingerprintRef.current[buildId]) return;
+
+        const baseline = personaDataRef.current;
+        const next = coercePersonaDataFromBackendJson(personaJson, baseline);
+        const nextUiFingerprint = fingerprintPersonaData(next);
+
+        if (nextUiFingerprint === lastAppliedPersonaUiFingerprintRef.current[buildId]) {
+          lastAppliedPersonaArtifactFingerprintRef.current[buildId] = artifactFingerprint;
+          if (sourcePath) lastAppliedPersonaSourcePathRef.current[buildId] = sourcePath;
+          return;
+        }
+
+        lastAppliedPersonaArtifactFingerprintRef.current[buildId] = artifactFingerprint;
+        lastAppliedPersonaUiFingerprintRef.current[buildId] = nextUiFingerprint;
+        if (sourcePath) lastAppliedPersonaSourcePathRef.current[buildId] = sourcePath;
+
+        if (!isIgnore && isMountedRef.current) setPersonaData(next);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[final][gen:${generationId}] artifact fetch failed`, err);
+      } finally {
+        isApplyingArtifactsRef.current[buildId] = false;
+      }
+    };
+
+    loadFinal();
 
     return () => {
       isIgnore = true;
@@ -1008,7 +1120,7 @@ export default function App() {
   const getFileType = (fileName: string): string => {
     const extension = fileName.split('.').pop()?.toUpperCase();
     return extension || 'FILE';
-  }
+  };
 
   return (
     <div
