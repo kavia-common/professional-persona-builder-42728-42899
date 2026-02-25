@@ -112,24 +112,10 @@ export default function App() {
   const profileImageInputRef = useRef<HTMLInputElement>(null);
   const newSkillInputRef = useRef<HTMLInputElement>(null);
 
-  // Guard against accidental recursive/rapid click triggering which can hang the browser in some cases.
-  const isTriggeringFileDialogRef = useRef(false);
-
-  const triggerFileDialog = (ref: React.RefObject<HTMLInputElement>) => {
-    if (isTriggeringFileDialogRef.current) return;
-    const el = ref.current;
-    if (!el) return;
-
-    isTriggeringFileDialogRef.current = true;
-    try {
-      el.click();
-    } finally {
-      // Release on next tick so React event bubbling finishes first.
-      window.setTimeout(() => {
-        isTriggeringFileDialogRef.current = false;
-      }, 0);
-    }
-  };
+  // NOTE: Do not use click-guard refs or setTimeout-based release logic here.
+  // Those patterns can accidentally create recursive click loops and freeze the browser.
+  // We trigger the native file picker only from the intended element via:
+  // fileInputRef.current?.click()
 
   // Track object URLs so we can revoke them (prevents memory leaks and long-term slowdowns/freezes).
   const profileImageObjectUrlRef = useRef<string | null>(null);
@@ -699,6 +685,7 @@ export default function App() {
                 marginBottom: '24px',
                 border: '1px solid rgba(20, 184, 166, 0.3)',
               }}
+              // Important: no onClick on this outer wrapper. Only the intended dropzone triggers the file picker.
               onMouseEnter={(e) => {
                 e.currentTarget.style.border = '1px solid #14B8A6';
                 e.currentTarget.style.boxShadow = '0px 6px 16px rgba(20, 184, 166, 0.15)';
@@ -709,24 +696,23 @@ export default function App() {
               }}
             >
               <div
-                onClick={(e) => {
-                  // Prevent any nested click handlers (e.g., remove buttons) from bubbling back into the dropzone click.
-                  e.stopPropagation();
-                  triggerFileDialog(fileInputRef);
-                }}
-                onDrop={(e) => {
-                  e.stopPropagation();
-                  handleDrop(e);
-                }}
-                onDragOver={(e) => {
-                  e.stopPropagation();
-                  handleDragOver(e);
-                }}
+                onClick={() => fileInputRef.current?.click()}
+                onDrop={handleDrop}
+                onDragOver={handleDragOver}
                 className="border-2 border-dashed rounded-xl p-12 cursor-pointer transition-colors hover:bg-gray-50"
                 style={{
                   borderColor: '#D1D5DB',
                   backgroundColor: uploadedFiles.length > 0 ? 'rgba(20, 184, 166, 0.05)' : 'transparent',
                 }}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    fileInputRef.current?.click();
+                  }
+                }}
+                aria-label="Upload documents (click to select files or drag and drop)"
               >
                 <Upload className="mx-auto mb-4" size={48} style={{ color: '#14B8A6' }} />
                 <p style={{ fontSize: '16px', fontWeight: 500, color: '#1F2937', marginBottom: '8px' }}>
