@@ -540,9 +540,10 @@ export default function App() {
   const handleGenerateDraft = async () => {
     const generationId = ++generationIdRef.current;
 
-    // Reset the circuit-breaker memory so a retry/new upload can't be blocked by an old build's artifact hash.
+    // Reset the circuit-breaker memory so a retry/new upload can't be blocked by an old build's artifact fingerprint.
     // (Authoritative instruction from user_input_ref)
-    lastAppliedPersonaArtifactJsonRef.current = {};
+    lastAppliedPersonaArtifactFingerprintRef.current = {};
+    lastAppliedPersonaUiFingerprintRef.current = {};
 
     // eslint-disable-next-line no-console
     console.log(`[draft][gen:${generationId}] handleGenerateDraft start`, {
@@ -777,23 +778,29 @@ export default function App() {
   /**
    * Prevent render loops/freezes from repeated artifact fetches and heavy comparisons.
    *
-   * Root issue:
-   * - In React 18 (especially in dev/StrictMode), effects and state updaters can be invoked more than once.
-   * - Updating the "already applied" ref inside a setState updater can be re-played and cause repeated
-   *   expensive coercion/stringify work, which presents as a UI freeze during draft generation.
+   * Failure mode:
+   * - Effect ran with dependency on `personaData`, and then called `setPersonaData(...)`.
+   * - That re-render changed `personaData`, which re-fired the effect, which fetched again...
+   * - Combined with "deep compare" work (stringify / coercion), this can look like the UI freezes.
    *
-   * Fix:
-   * - Use a non-reentrant "in flight" guard per buildId.
-   * - Update the "already applied" ref OUTSIDE of setState so replays don't re-trigger work.
-   * - Compare a small, stable fingerprint of the *UI-visible* fields rather than JSON.stringify-ing the full object.
+   * Fix approach (minimal + safe):
+   * - Non-re-entrant "in-flight" guard per buildId (prevents concurrent applies).
+   * - Idempotent: track a lightweight *raw artifact fingerprint* (no JSON.stringify loops).
+   * - Only call setPersonaData when a small UI fingerprint changes.
+   * - Do NOT depend on `personaData` in the effect; use a ref snapshot for the baseline.
    */
-  const lastAppliedPersonaArtifactJsonRef = useRef<Record<string, string>>({});
-  const lastAppliedPersonaFingerprintRef = useRef<Record<string, string>>({});
+  const lastAppliedPersonaArtifactFingerprintRef = useRef<Record<string, string>>({});
+  const lastAppliedPersonaUiFingerprintRef = useRef<Record<string, string>>({});
   const isApplyingArtifactsRef = useRef<Record<string, boolean>>({});
+
+  const personaDataRef = useRef<PersonaData>(initialPersonaFallback);
+  useEffect(() => {
+    personaDataRef.current = personaData;
+  }, [personaData]);
 
   function fingerprintPersonaData(p: PersonaData): string {
     // Cheap, stable fingerprint across the fields we actually render.
-    // Avoids JSON.stringify on deep structures (experiences can grow).
+    // Avoid JSON.stringify on deep structures (experiences can grow).
     return [
       p.name ?? '',
       p.title ?? '',
@@ -802,6 +809,44 @@ export default function App() {
       (p.careerHighlights ?? []).join('|'),
       String((p.experiences ?? []).length),
     ].join('::');
+  }
+
+  function fingerprintPersonaArtifact(personaJson: any): string {
+    /**
+     * A small, stable fingerprint for the raw backend artifact.
+     * This intentionally ignores large text fields and deep structures to avoid CPU spikes.
+     * It's good enough to prevent re-applying the same payload repeatedly.
+     */
+    if (!isNonEmptyObject(personaJson)) return 'empty';
+    const profileHeadline =
+      typeof (personaJson as any)?.profile?.headline === 'string' ? (personaJson as any).profile.headline : '';
+    const title = typeof (personaJson as any)?.title === 'string' ? (personaJson as any).title : '';
+    const summary = typeof (personaJson as any)?.summary === 'string' ? (personaJson as any).summary : '';
+    const professionalSummary =
+      typeof (personaJson as any)?.professional_summary === 'string' ? (personaJson as any).professional_summary : '';
+
+    const skillsLen = Array.isArray((personaJson as any)?.skills) ? (personaJson as any).skills.length : 0;
+    const coreCompetenciesLen = Array.isArray((personaJson as any)?.core_competencies)
+      ? (personaJson as any).core_competencies.length
+      : 0;
+    const highlightsLen = Array.isArray((personaJson as any)?.career_highlights)
+      ? (personaJson as any).career_highlights.length
+      : 0;
+
+    // Include keys count as a cheap proxy for "shape changed".
+    const keysCount = Object.keys(personaJson).length;
+
+    // Keep summary payload small: only use lengths (not full text) for potentially long fields.
+    return [
+      'k:' + String(keysCount),
+      'h:' + String(profileHeadline.length),
+      't:' + String(title.length),
+      's:' + String(summary.length),
+      'ps:' + String(professionalSummary.length),
+      'skills:' + String(skillsLen),
+      'cc:' + String(coreCompetenciesLen),
+      'hl:' + String(highlightsLen),
+    ].join('|');
   }
 
   // When we enter draft state, attempt to fetch orchestration artifacts and populate UI persona (best-effort).
@@ -833,24 +878,26 @@ export default function App() {
         // Only proceed if personaJson is a real object with keys
         if (!personaJson || typeof personaJson !== 'object' || Object.keys(personaJson).length === 0) return;
 
-        const artifactJson = safeJsonStringify(personaJson);
+        const artifactFingerprint = fingerprintPersonaArtifact(personaJson);
 
-        // Gate 1: if raw artifact JSON is identical to what we've already applied, do nothing.
-        if (artifactJson === lastAppliedPersonaArtifactJsonRef.current[buildId]) return;
+        // Gate 1: if raw artifact fingerprint is identical to what we've already applied, do nothing.
+        if (artifactFingerprint === lastAppliedPersonaArtifactFingerprintRef.current[buildId]) return;
 
-        // Compute the next persona data once (outside setState) to avoid replay cost.
-        const next = coercePersonaDataFromBackendJson(personaJson, personaData);
-        const nextFingerprint = fingerprintPersonaData(next);
+        // Compute next persona data once (outside setState) to avoid replay cost.
+        const baseline = personaDataRef.current;
+        const next = coercePersonaDataFromBackendJson(personaJson, baseline);
+        const nextUiFingerprint = fingerprintPersonaData(next);
 
-        // Gate 2: if UI-visible fields didn't change, do nothing (but still remember we've seen this artifact).
-        if (nextFingerprint === lastAppliedPersonaFingerprintRef.current[buildId]) {
-          lastAppliedPersonaArtifactJsonRef.current[buildId] = artifactJson;
+        // Gate 2: if UI-visible fields didn't change, do not set state,
+        // but still remember we've seen this artifact payload.
+        if (nextUiFingerprint === lastAppliedPersonaUiFingerprintRef.current[buildId]) {
+          lastAppliedPersonaArtifactFingerprintRef.current[buildId] = artifactFingerprint;
           return;
         }
 
         // Commit: update refs first (idempotent), then setState once.
-        lastAppliedPersonaArtifactJsonRef.current[buildId] = artifactJson;
-        lastAppliedPersonaFingerprintRef.current[buildId] = nextFingerprint;
+        lastAppliedPersonaArtifactFingerprintRef.current[buildId] = artifactFingerprint;
+        lastAppliedPersonaUiFingerprintRef.current[buildId] = nextUiFingerprint;
 
         if (!isIgnore && isMountedRef.current) {
           setPersonaData(next);
@@ -869,8 +916,7 @@ export default function App() {
     return () => {
       isIgnore = true;
     };
-    // Include personaData so we coerce from freshest baseline, but guards above prevent loops.
-  }, [buildId, state, hasError, personaData]);
+  }, [buildId, state, hasError]);
 
   // Load versions whenever personaId becomes available.
   useEffect(() => {
