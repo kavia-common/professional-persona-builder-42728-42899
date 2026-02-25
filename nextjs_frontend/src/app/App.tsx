@@ -81,6 +81,21 @@ function isNonEmptyObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && Object.keys(value as any).length > 0;
 }
 
+/**
+ * Returns initials for a display label (e.g., user name) to be shown in avatar chips.
+ * Keeps behavior consistent between different avatar locations.
+ */
+function getInitials(label: string): string {
+  const base = label.trim();
+  if (!base) return '•';
+  const parts = base.split(/\s+/).filter(Boolean);
+  const initials = parts
+    .slice(0, 2)
+    .map((p) => p[0]?.toUpperCase())
+    .join('');
+  return initials || '•';
+}
+
 function inferDraftFromOrchestrationRecord(orch: any): any | null {
   /**
    * Best-effort extraction of persona JSON from orchestration record.
@@ -150,7 +165,10 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
 
     const skills = asStringArray(personaJson?.skills);
     if (skills.length === 0 && personaJson?.skills !== undefined) {
-      console.warn('[persona][coerce] skills missing/invalid/empty; falling back to previous skills. skillsCandidate=', personaJson?.skills);
+      console.warn(
+        '[persona][coerce] skills missing/invalid/empty; falling back to previous skills. skillsCandidate=',
+        personaJson?.skills
+      );
     }
 
     const experienceHighlights = asStringArray(personaJson?.experienceHighlights);
@@ -179,6 +197,26 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
 }
 
 export default function App() {
+  /**
+   * Render-loop diagnostics:
+   * - we keep a simple render counter and timestamp window
+   * - if renders spike, log an actionable snapshot (state/buildId/personaId)
+   *
+   * This is intentionally low-overhead (no setState) and only logs to console.
+   */
+  const renderDiagRef = useRef<{ count: number; windowStartMs: number }>({
+    count: 0,
+    windowStartMs: Date.now(),
+  });
+
+  renderDiagRef.current.count += 1;
+  const nowMs = Date.now();
+  const windowMs = 1500;
+  if (nowMs - renderDiagRef.current.windowStartMs > windowMs) {
+    renderDiagRef.current.count = 1;
+    renderDiagRef.current.windowStartMs = nowMs;
+  }
+
   const [state, setState] = useState<AppState>('initial');
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFileData[]>([]);
   const [uploadError, setUploadError] = useState<string>('');
@@ -249,9 +287,31 @@ export default function App() {
    */
   const [personaData, setPersonaData] = useState<PersonaData | null>(null);
 
+  // Memoize commonly accessed persona fields to keep effect deps primitive & stable.
+  const personaName = personaData?.name ?? '';
+  const personaTitle = personaData?.title ?? '';
+  const personaSummary = personaData?.summary ?? '';
+
+  // Render-loop diagnostics logging (after primitives exist).
+  if (renderDiagRef.current.count >= 30) {
+    // eslint-disable-next-line no-console
+    console.warn('[render-loop][suspected] high render rate', {
+      rendersWithinWindow: renderDiagRef.current.count,
+      windowMs,
+      state,
+      buildId,
+      personaId,
+      isPolling,
+      personaNameLen: personaName.length,
+      personaTitleLen: personaTitle.length,
+      personaSummaryLen: personaSummary.length,
+    });
+  }
+
   useEffect(() => {
     if (personaData !== null) return;
     setPersonaData(initialPersonaFallback);
+    // IMPORTANT: only depends on primitive guard + stable memo.
   }, [initialPersonaFallback, personaData]);
 
   const ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.txt'];
@@ -279,6 +339,7 @@ export default function App() {
   };
 
   const addFiles = (files: File[]) => {
+    // Avoid calling setState from inside other state updaters (can create confusing re-entrancy patterns).
     setUploadError('');
     setBackendError('');
 
@@ -289,21 +350,19 @@ export default function App() {
       return;
     }
 
-    setUploadedFiles((prev) => {
-      // Check if adding these files would exceed the limit (based on latest state)
-      if (prev.length + files.length > MAX_FILES) {
-        // Setting state during an updater is okay; React will batch. This avoids stale closure.
-        setUploadError(`Maximum ${MAX_FILES} documents allowed.`);
-        return prev;
-      }
+    // Precompute based on current state to avoid side effects inside updater function.
+    const currentCount = uploadedFiles.length;
+    if (currentCount + files.length > MAX_FILES) {
+      setUploadError(`Maximum ${MAX_FILES} documents allowed.`);
+      return;
+    }
 
-      const newUploadedFiles = files.map((file) => ({
-        id: Math.random().toString(36).substr(2, 9),
-        file,
-      }));
+    const newUploadedFiles = files.map((file) => ({
+      id: Math.random().toString(36).substr(2, 9),
+      file,
+    }));
 
-      return [...prev, ...newUploadedFiles];
-    });
+    setUploadedFiles((prev) => [...prev, ...newUploadedFiles]);
   };
 
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
@@ -532,7 +591,8 @@ export default function App() {
       clearInterval(interval);
       console.log(`[poll][gen:${generationId}] stopped polling (cleanup)`, { buildId });
     };
-  }, [buildId, initialPersonaFallback, state]);
+    // IMPORTANT: keep dependencies primitive to avoid object-identity loops.
+  }, [buildId, state]);
 
   // When we enter draft state, attempt to fetch orchestration artifacts and populate UI persona (best-effort).
   useEffect(() => {
@@ -588,21 +648,21 @@ export default function App() {
 
           // Guard requested by user: avoid updating state if draft yields effectively same personaData.
           // This prevents effect-driven update loops when artifacts are fetched repeatedly.
-          if (maybeDraft && JSON.stringify(coerced) === JSON.stringify(prev ?? initialPersonaFallback)) {
+          if (JSON.stringify(coerced) === JSON.stringify(prev ?? initialPersonaFallback)) {
             console.log(`[artifacts][gen:${generationId}] personaData unchanged; skipping setPersonaData update`);
             return prev;
           }
 
           // Extra diagnostics
           if (prev) {
-            const prevSummary = prev?.summary;
-            const nextSummary = coerced?.summary;
-            if (prevSummary === nextSummary) {
+            const prevSummaryLocal = prev?.summary;
+            const nextSummaryLocal = coerced?.summary;
+            if (prevSummaryLocal === nextSummaryLocal) {
               console.warn(
                 `[artifacts][gen:${generationId}] coercion did not change summary; possible fallback usage. prevSummaryLen=`,
-                prevSummary?.length,
+                prevSummaryLocal?.length,
                 'nextSummaryLen=',
-                nextSummary?.length
+                nextSummaryLocal?.length
               );
             }
           }
@@ -621,7 +681,8 @@ export default function App() {
       cancelled = true;
       console.log(`[artifacts][gen:${generationId}] cleanup (cancelled)`, { buildId });
     };
-  }, [buildId, state]);
+    // initialPersonaFallback is stable (memo []), buildId/state are primitives.
+  }, [buildId, state, initialPersonaFallback]);
 
   // Load versions whenever personaId becomes available.
   useEffect(() => {
@@ -695,26 +756,12 @@ export default function App() {
   };
 
   const avatarInitials = useMemo(() => {
-    const base = ((personaData?.name || personaData?.title || '') as string).trim();
-    if (!base) return '•';
-    const parts = base.split(/\s+/).filter(Boolean);
-    const initials = parts
-      .slice(0, 2)
-      .map((p) => p[0]?.toUpperCase())
-      .join('');
-    return initials || '•';
-  }, [personaData?.name, personaData?.title]);
+    return getInitials((personaName || personaTitle).trim());
+  }, [personaName, personaTitle]);
 
   const personaCardInitials = useMemo(() => {
-    const base = (personaData?.name || '').trim();
-    if (!base) return '•';
-    const parts = base.split(/\s+/).filter(Boolean);
-    const initials = parts
-      .slice(0, 2)
-      .map((p) => p[0]?.toUpperCase())
-      .join('');
-    return initials || '•';
-  }, [personaData?.name]);
+    return getInitials(personaName);
+  }, [personaName]);
 
   const currentStep = state === 'initial' || state === 'processing' ? 1 : state === 'draft' ? 2 : 3;
   const step1Complete = state === 'draft' || state === 'finalized';
@@ -763,7 +810,7 @@ export default function App() {
                 fontWeight: 600,
               }}
               aria-label="Open profile menu"
-              title={personaData?.name || personaData?.title || 'Profile'}
+              title={personaName || personaTitle || 'Profile'}
             >
               {avatarInitials}
             </button>
@@ -1827,16 +1874,16 @@ export default function App() {
             >
               {/* Persona Header */}
               <div className="flex items-center gap-4 mb-8 pb-6" style={{ borderBottom: '1px solid #D1D5DB' }}>
-                {personaData.profileImage ? (
+                {personaData?.profileImage ? (
                   <img src={personaData.profileImage} alt="Profile" className="w-20 h-20 rounded-full object-cover flex-shrink-0" />
                 ) : (
                   <div className="w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0" style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '28px', fontWeight: 600 }}>
-                    {personaData.name.split(' ').map((n) => n[0]).join('')}
+                    {personaCardInitials}
                   </div>
                 )}
                 <div>
-                  <h3 style={{ fontSize: '24px', fontWeight: 600, color: '#1F2937', marginBottom: '4px' }}>{personaData.name}</h3>
-                  <p style={{ fontSize: '16px', color: '#6B7280' }}>{personaData.title}</p>
+                  <h3 style={{ fontSize: '24px', fontWeight: 600, color: '#1F2937', marginBottom: '4px' }}>{personaName}</h3>
+                  <p style={{ fontSize: '16px', color: '#6B7280' }}>{personaTitle}</p>
                 </div>
               </div>
 
