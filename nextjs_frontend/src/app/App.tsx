@@ -172,6 +172,9 @@ export default function App() {
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    // Prevent bubbling into any parent click handlers (and avoid any chance of recursive click loops).
+    e.stopPropagation();
+
     if (!e.target.files) return;
 
     const newFiles = Array.from(e.target.files);
@@ -696,23 +699,16 @@ export default function App() {
               }}
             >
               <div
-                onClick={() => fileInputRef.current?.click()}
                 onDrop={handleDrop}
                 onDragOver={handleDragOver}
-                className="border-2 border-dashed rounded-xl p-12 cursor-pointer transition-colors hover:bg-gray-50"
+                className="border-2 border-dashed rounded-xl p-12 transition-colors hover:bg-gray-50"
                 style={{
                   borderColor: '#D1D5DB',
                   backgroundColor: uploadedFiles.length > 0 ? 'rgba(20, 184, 166, 0.05)' : 'transparent',
                 }}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    fileInputRef.current?.click();
-                  }
-                }}
-                aria-label="Upload documents (click to select files or drag and drop)"
+                // Drag/drop only: do NOT make this div clickable to avoid recursive click loops/freezes.
+                role="region"
+                aria-label="Upload documents (drag and drop)"
               >
                 <Upload className="mx-auto mb-4" size={48} style={{ color: '#14B8A6' }} />
                 <p style={{ fontSize: '16px', fontWeight: 500, color: '#1F2937', marginBottom: '8px' }}>
@@ -721,9 +717,35 @@ export default function App() {
                 <p style={{ fontSize: '14px', color: '#6B7280' }}>
                   Resume, Job Description, Performance Review, Certifications
                 </p>
-                <p style={{ fontSize: '14px', color: '#6B7280' }}>
+                <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '12px' }}>
                   Supported formats: PDF, DOCX, TXT (Max {MAX_FILES} files)
                 </p>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    fileInputRef.current?.click();
+                  }}
+                  className="inline-flex items-center justify-center rounded-lg transition-all duration-200"
+                  style={{
+                    backgroundColor: '#14B8A6',
+                    color: 'white',
+                    padding: '10px 14px',
+                    fontSize: '14px',
+                    fontWeight: 600,
+                    border: 'none',
+                    cursor: 'pointer',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = '#0FB9B1';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = '#14B8A6';
+                  }}
+                >
+                  Select Files
+                </button>
               </div>
 
               {uploadError && (
