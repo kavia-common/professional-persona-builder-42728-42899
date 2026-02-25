@@ -915,7 +915,7 @@ export default function App() {
   const getFileType = (fileName: string): string => {
     const extension = fileName.split('.').pop()?.toUpperCase();
     return extension || 'FILE';
-  };
+  }
 
   return (
     <div
