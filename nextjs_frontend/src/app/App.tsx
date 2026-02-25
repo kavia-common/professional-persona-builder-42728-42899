@@ -1,13 +1,8 @@
-'use client';
-
 import { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Upload, Loader2, X, Edit3, Plus, CheckCircle2, Camera, Award, Compass } from 'lucide-react';
 
-// The original export referenced a `figma:asset/...` virtual module.
-// Use the equivalent local file that exists in `src/assets/`.
-import bgImage from '../assets/24fa192a7a1db10ae3078a00cc00f09e2f26b6de.png';
-import { apiClient, ApiError, PersonaDraft } from '../lib/apiClient';
+const bgImage = '/assets/24fa192a7a1db10ae3078a00cc00f09e2f26b6de.png';
 
 type AppState = 'initial' | 'processing' | 'draft' | 'finalized';
 
@@ -56,8 +51,7 @@ export default function App() {
   const [personaData, setPersonaData] = useState<PersonaData>({
     name: 'Sarah Johnson',
     title: 'Senior Product Manager',
-    summary:
-      'Results-driven Product Manager with 8+ years of experience leading cross-functional teams to deliver innovative SaaS solutions. Proven track record in strategic planning, user-centered design, and data-driven decision making. Passionate about transforming complex business challenges into elegant product experiences.',
+    summary: 'Results-driven Product Manager with 8+ years of experience leading cross-functional teams to deliver innovative SaaS solutions. Proven track record in strategic planning, user-centered design, and data-driven decision making. Passionate about transforming complex business challenges into elegant product experiences.',
     skills: ['Product Strategy', 'Agile/Scrum', 'User Research', 'Data Analytics', 'Roadmap Planning', 'Stakeholder Management'],
     experiences: [
       {
@@ -65,17 +59,15 @@ export default function App() {
         role: 'Senior Product Manager',
         company: 'TechCorp Solutions',
         date: '2020 - Present',
-        description:
-          'Leading product development for enterprise SaaS platform serving 500K+ users. Increased user engagement by 45% through data-driven feature prioritization.',
+        description: 'Leading product development for enterprise SaaS platform serving 500K+ users. Increased user engagement by 45% through data-driven feature prioritization.'
       },
       {
         id: '2',
         role: 'Product Manager',
         company: 'Innovation Labs',
         date: '2017 - 2020',
-        description:
-          'Managed end-to-end product lifecycle for B2B marketplace. Successfully launched 3 major features that contributed to 30% revenue growth.',
-      },
+        description: 'Managed end-to-end product lifecycle for B2B marketplace. Successfully launched 3 major features that contributed to 30% revenue growth.'
+      }
     ],
     education: ['MBA, Stanford University', 'BS Computer Science, UC Berkeley'],
     certifications: ['Certified Scrum Product Owner (CSPO)', 'Google Analytics Certified'],
@@ -86,50 +78,9 @@ export default function App() {
       'Drove 45% increase in user engagement across enterprise platform',
       'Led cross-functional team of 12 members to successful product launch',
       'Achieved 30% revenue growth through strategic feature prioritization',
-      'Delivered 3 major product releases under budget and ahead of schedule',
-    ],
+      'Delivered 3 major product releases under budget and ahead of schedule'
+    ]
   });
-
-  const [activeBuildId, setActiveBuildId] = useState<string | null>(null);
-
-  /**
-   * Maps the backend PersonaDraft schema to the UI's PersonaData shape without changing UI layout/components.
-   */
-  const mapDraftToPersonaData = (draft: PersonaDraft): PersonaData => {
-    const headlineParts = (draft.profile?.headline || '').split(' - ');
-    const nameFromHeadline = headlineParts.length > 1 ? headlineParts[0] : undefined;
-    const titleFromHeadline = headlineParts.length > 1 ? headlineParts.slice(1).join(' - ') : draft.title;
-
-    return {
-      name: nameFromHeadline || personaData.name,
-      title: titleFromHeadline || personaData.title,
-      summary: draft.summary || personaData.summary,
-      skills: Array.isArray(draft.skills) && draft.skills.length > 0 ? draft.skills : personaData.skills,
-      // Backend draft is highlight-based; keep experiences UI stable by populating description-only placeholders.
-      experiences:
-        Array.isArray(draft.experienceHighlights) && draft.experienceHighlights.length > 0
-          ? draft.experienceHighlights.map((h, idx) => ({
-              id: `api-exp-${idx}-${Math.random().toString(36).slice(2, 9)}`,
-              role: 'Experience Highlight',
-              company: 'From Uploaded Documents',
-              date: '—',
-              description: h,
-            }))
-          : personaData.experiences,
-      // Keep the rest of the UI sections intact; backend draft doesn't provide these fields yet.
-      education: personaData.education,
-      certifications: personaData.certifications,
-      tools: personaData.tools,
-      industries:
-        draft.profile?.industry && String(draft.profile.industry).trim()
-          ? [String(draft.profile.industry)]
-          : personaData.industries,
-      yearsOfExperience: personaData.yearsOfExperience,
-      careerHighlights:
-        Array.isArray(draft.strengths) && draft.strengths.length > 0 ? draft.strengths : personaData.careerHighlights,
-      profileImage: personaData.profileImage,
-    };
-  };
 
   const ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.txt'];
   const MAX_FILES = 5;
@@ -149,7 +100,7 @@ export default function App() {
 
   const addFiles = (files: File[]) => {
     setUploadError('');
-
+    
     // Check if adding these files would exceed the limit
     if (uploadedFiles.length + files.length > MAX_FILES) {
       setUploadError(`Maximum ${MAX_FILES} documents allowed.`);
@@ -189,46 +140,11 @@ export default function App() {
     setUploadError('');
   };
 
-  const handleGenerateDraft = async () => {
-    setUploadError('');
+  const handleGenerateDraft = () => {
     setState('processing');
-
-    try {
-      // 1) Upload documents (backend persists metadata + best-effort extraction as side effects).
-      await apiClient.uploadDocuments({
-        files: uploadedFiles.map((f) => f.file),
-        // No auth/user system in this UI yet; keep userId unset for now.
-      });
-
-      // 2) Run orchestration end-to-end; backend can auto-select latest docs by category.
-      // We uploaded docs without categories (UI does not currently collect category),
-      // so we rely on backend's current behavior (or future auto-selection).
-      const runAll = await apiClient.orchestrationRunAll({
-        autoCreatePersona: true,
-        useLatestCategoryDocs: true,
-      });
-
-      setActiveBuildId(runAll.build.id);
-
-      // 3) Fetch draft persona artifact from orchestration record if present.
-      // The run-all response doesn't embed persona directly in the typed schema above,
-      // but orchestration record typically carries it. Use a safe extraction.
-      const maybePersona = (runAll.orchestration as any)?.personaDraft || (runAll.orchestration as any)?.draft;
-      if (maybePersona && typeof maybePersona === 'object') {
-        setPersonaData(mapDraftToPersonaData(maybePersona as PersonaDraft));
-      }
-
+    setTimeout(() => {
       setState('draft');
-    } catch (err) {
-      const message =
-        err instanceof ApiError
-          ? err.message
-          : err instanceof Error
-            ? err.message
-            : 'Failed to generate draft persona.';
-      setUploadError(message);
-      setState('initial');
-    }
+    }, 2000);
   };
 
   const handleSaveChanges = () => {
@@ -240,31 +156,9 @@ export default function App() {
     }, 3000);
   };
 
-  const handleFinalize = async () => {
-    // Preserve UI behavior: immediately move to finalized after backend call succeeds.
-    try {
-      if (activeBuildId) {
-        // Send the current edited personaData as the final override.
-        // This keeps UI unchanged while persisting server-side if configured.
-        await apiClient.finalizeBuild({
-          buildId: activeBuildId,
-          finalOverride: personaData as any,
-          saveFinal: true,
-          createVersion: true,
-        });
-      }
-      setState('finalized');
-      setIsEditable(false);
-    } catch (err) {
-      const message =
-        err instanceof ApiError
-          ? err.message
-          : err instanceof Error
-            ? err.message
-            : 'Failed to finalize persona.';
-      // Reuse existing error surface (under upload card).
-      setUploadError(message);
-    }
+  const handleFinalize = () => {
+    setState('finalized');
+    setIsEditable(false);
   };
 
   const removeSkill = (skillToRemove: string) => {
@@ -321,7 +215,7 @@ export default function App() {
   };
 
   return (
-    <div
+    <div 
       className="min-h-screen"
       style={{
         backgroundImage: `url(${bgImage})`,
@@ -334,70 +228,70 @@ export default function App() {
       {/* Header */}
       <header className="bg-white border-b" style={{ borderColor: '#D1D5DB' }}>
         <div style={{ padding: '16px 32px' }} className="flex items-center justify-between">
+  
+  {/* LEFT - Logo */}
+  <div className="flex items-center gap-3">
+    <div 
+      className="w-9 h-9 rounded-lg flex items-center justify-center"
+      style={{ 
+        backgroundColor: '#14B8A6',
+        boxShadow: '0 2px 4px rgba(20, 184, 166, 0.15)'
+      }}
+    >
+      <Compass size={20} style={{ color: 'white' }} />
+    </div>
+    <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', margin: 0 }}>
+      Career Navigator
+    </h1>
+  </div>
 
-          {/* LEFT - Logo */}
-          <div className="flex items-center gap-3">
-            <div
-              className="w-9 h-9 rounded-lg flex items-center justify-center"
-              style={{
-                backgroundColor: '#14B8A6',
-                boxShadow: '0 2px 4px rgba(20, 184, 166, 0.15)'
-              }}
-            >
-              <Compass size={20} style={{ color: 'white' }} />
-            </div>
-            <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#1F2937', margin: 0 }}>
-              Career Navigator
-            </h1>
-          </div>
+  {/* RIGHT - Profile Circle */}
+  <div className="relative">
+    <button
+      onClick={() => setIsProfileOpen(!isProfileOpen)}
+      className="w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200"
+      style={{
+        backgroundColor: '#14B8A6',
+        color: 'white',
+        fontSize: '14px',
+        fontWeight: 600
+      }}
+    >
+      SJ
+    </button>
 
-          {/* RIGHT - Profile Circle */}
-          <div className="relative">
-            <button
-              onClick={() => setIsProfileOpen(!isProfileOpen)}
-              className="w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200"
-              style={{
-                backgroundColor: '#14B8A6',
-                color: 'white',
-                fontSize: '14px',
-                fontWeight: 600
-              }}
-            >
-              SJ
-            </button>
+    <AnimatePresence>
+      {isProfileOpen && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -10 }}
+          transition={{ duration: 0.2 }}
+          className="absolute right-0 mt-2 w-40 bg-white rounded-lg"
+          style={{
+            border: '1px solid #D1D5DB',
+            boxShadow: '0 8px 20px rgba(0, 0, 0, 0.08)'
+          }}
+        >
+          <button className="w-full text-left px-4 py-2 hover:bg-gray-50">
+            Profile Settings
+          </button>
+          <button className="w-full text-left px-4 py-2 hover:bg-gray-50 text-red-600">
+            Logout
+          </button>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  </div>
 
-            <AnimatePresence>
-              {isProfileOpen && (
-                <motion.div
-                  initial={{ opacity: 0, y: -10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -10 }}
-                  transition={{ duration: 0.2 }}
-                  className="absolute right-0 mt-2 w-40 bg-white rounded-lg"
-                  style={{
-                    border: '1px solid #D1D5DB',
-                    boxShadow: '0 8px 20px rgba(0, 0, 0, 0.08)'
-                  }}
-                >
-                  <button className="w-full text-left px-4 py-2 hover:bg-gray-50">
-                    Profile Settings
-                  </button>
-                  <button className="w-full text-left px-4 py-2 hover:bg-gray-50 text-red-600">
-                    Logout
-                  </button>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-
-        </div>
+</div>
       </header>
 
       {/* Step Progress */}
       <div className="bg-white" style={{ padding: '24px 32px', borderBottom: '1px solid #D1D5DB' }}>
         <div className="flex items-center justify-center gap-4 max-w-3xl mx-auto">
           <div className="flex items-center gap-3">
-            <div
+            <div 
               className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300"
               style={{
                 backgroundColor: step1Complete ? '#14B8A6' : (currentStep === 1 ? '#14B8A6' : 'transparent'),
@@ -409,9 +303,9 @@ export default function App() {
             >
               1
             </div>
-            <span
-              style={{
-                fontSize: '14px',
+            <span 
+              style={{ 
+                fontSize: '14px', 
                 fontWeight: 500,
                 color: step1Complete || currentStep === 1 ? '#1F2937' : '#6B7280'
               }}
@@ -419,14 +313,14 @@ export default function App() {
               Ingestion Hub
             </span>
           </div>
-
-          <div
+          
+          <div 
             className="h-0.5 w-12 transition-colors duration-300"
             style={{ backgroundColor: step1Complete ? '#14B8A6' : '#D1D5DB' }}
           />
 
           <div className="flex items-center gap-3">
-            <div
+            <div 
               className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300"
               style={{
                 backgroundColor: step2Complete ? '#14B8A6' : (currentStep === 2 ? '#14B8A6' : 'transparent'),
@@ -438,9 +332,9 @@ export default function App() {
             >
               2
             </div>
-            <span
-              style={{
-                fontSize: '14px',
+            <span 
+              style={{ 
+                fontSize: '14px', 
                 fontWeight: 500,
                 color: step2Complete || currentStep === 2 ? '#1F2937' : '#6B7280'
               }}
@@ -449,13 +343,13 @@ export default function App() {
             </span>
           </div>
 
-          <div
+          <div 
             className="h-0.5 w-12 transition-colors duration-300"
             style={{ backgroundColor: step2Complete ? '#14B8A6' : '#D1D5DB' }}
           />
 
           <div className="flex items-center gap-3">
-            <div
+            <div 
               className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300"
               style={{
                 backgroundColor: step3Complete ? '#14B8A6' : (currentStep === 3 ? '#14B8A6' : 'transparent'),
@@ -467,9 +361,9 @@ export default function App() {
             >
               3
             </div>
-            <span
-              style={{
-                fontSize: '14px',
+            <span 
+              style={{ 
+                fontSize: '14px', 
                 fontWeight: 500,
                 color: step3Complete || currentStep === 3 ? '#1F2937' : '#6B7280'
               }}
@@ -490,17 +384,17 @@ export default function App() {
             transition={{ duration: 0.3 }}
             className="max-w-2xl mx-auto text-center"
           >
-            <motion.h2
+            <motion.h2 
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.3, delay: 0.1 }}
               onMouseEnter={() => setIsHoveringHeading(true)}
               onMouseLeave={() => setIsHoveringHeading(false)}
               className="relative inline-block cursor-default"
-              style={{
-                fontSize: '36px',
-                fontWeight: 700,
-                color: '#14B8A6',
+              style={{ 
+                fontSize: '36px', 
+                fontWeight: 700, 
+                color: '#14B8A6', 
                 marginBottom: '8px',
                 transition: 'color 0.3s ease'
               }}
@@ -525,9 +419,9 @@ export default function App() {
               Upload your Professional Documents to generate your AI-powered Persona
             </p>
 
-            <div
+            <div 
               className="bg-white rounded-xl p-8 transition-all duration-300 group"
-              style={{
+              style={{ 
                 boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.05)',
                 marginBottom: '24px',
                 border: '1px solid rgba(20, 184, 166, 0.3)'
@@ -554,19 +448,19 @@ export default function App() {
                 onDrop={handleDrop}
                 onDragOver={handleDragOver}
                 className="border-2 border-dashed rounded-xl p-12 cursor-pointer transition-colors hover:bg-gray-50"
-                style={{
+                style={{ 
                   borderColor: '#D1D5DB',
                   backgroundColor: uploadedFiles.length > 0 ? 'rgba(20, 184, 166, 0.05)' : 'transparent'
                 }}
               >
-                <Upload
-                  className="mx-auto mb-4"
-                  size={48}
+                <Upload 
+                  className="mx-auto mb-4" 
+                  size={48} 
                   style={{ color: '#14B8A6' }}
                 />
                 <p style={{ fontSize: '16px', fontWeight: 500, color: '#1F2937', marginBottom: '8px' }}>
-                  {uploadedFiles.length > 0
-                    ? `${uploadedFiles.length} file(s) uploaded`
+                  {uploadedFiles.length > 0 
+                    ? `${uploadedFiles.length} file(s) uploaded` 
                     : 'Upload your Documents '}
                 </p>
                 <p style={{ fontSize: '14px', color: '#6B7280' }}>
@@ -578,12 +472,12 @@ export default function App() {
               </div>
 
               {uploadError && (
-                <motion.p
+                <motion.p 
                   initial={{ opacity: 0, y: -10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  style={{
-                    fontSize: '14px',
-                    color: '#DC2626',
+                  style={{ 
+                    fontSize: '14px', 
+                    color: '#DC2626', 
                     marginTop: '12px',
                     textAlign: 'center'
                   }}
@@ -605,9 +499,9 @@ export default function App() {
                       className="flex items-center justify-between p-3 rounded-lg bg-gray-50 hover:bg-gray-100 transition-colors"
                     >
                       <div className="flex items-center gap-3">
-                        <span
+                        <span 
                           className="px-2 py-1 rounded text-xs font-medium"
-                          style={{
+                          style={{ 
                             backgroundColor: 'rgba(20, 184, 166, 0.1)',
                             color: '#14B8A6'
                           }}
@@ -672,17 +566,17 @@ export default function App() {
             className="max-w-7xl mx-auto"
             style={{ paddingBottom: isEditable && state === 'draft' ? '100px' : '0' }}
           >
-            <motion.h2
+            <motion.h2 
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.3 }}
               onMouseEnter={() => setIsHoveringHeading(true)}
               onMouseLeave={() => setIsHoveringHeading(false)}
               className="relative inline-block cursor-default mx-auto"
-              style={{
-                fontSize: state === 'draft' ? '36px' : '32px',
-                fontWeight: 700,
-                color: state === 'draft' ? '#14B8A6' : '#1F2937',
+              style={{ 
+                fontSize: state === 'draft' ? '36px' : '32px', 
+                fontWeight: 700, 
+                color: state === 'draft' ? '#14B8A6' : '#1F2937', 
                 marginBottom: '32px',
                 display: 'block',
                 textAlign: 'center',
@@ -719,24 +613,24 @@ export default function App() {
                 className="lg:col-span-2"
               >
                 {state === 'draft' && (
-                  <button
-                    onClick={() => setState('initial')}
-                    className="mb-4 flex items-center gap-2 transition-all duration-200 hover:opacity-80"
-                    style={{
-                      color: '#14B8A6',
-                      fontWeight: 500,
-                      fontSize: '14px',
-                      background: 'none',
-                      border: 'none',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    ← Go Back
-                  </button>
-                )}
-                <div
+  <button
+    onClick={() => setState('initial')}
+    className="mb-4 flex items-center gap-2 transition-all duration-200 hover:opacity-80"
+    style={{
+      color: '#14B8A6',
+      fontWeight: 500,
+      fontSize: '14px',
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer'
+    }}
+  >
+    ← Go Back
+  </button>
+)}
+                <div 
                   className="bg-white rounded-xl transition-all duration-300"
-                  style={{
+                  style={{ 
                     boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.05)',
                     padding: '24px',
                     border: '1px solid rgba(20, 184, 166, 0.3)'
@@ -753,7 +647,7 @@ export default function App() {
                   <h3 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '16px' }}>
                     Uploaded Documents
                   </h3>
-
+                  
                   <div className="space-y-3 mb-6">
                     {uploadedFiles.map((fileData) => (
                       <div
@@ -761,9 +655,9 @@ export default function App() {
                         className="flex items-center justify-between p-3 rounded-lg bg-gray-50"
                       >
                         <div className="flex items-center gap-3">
-                          <span
+                          <span 
                             className="px-2 py-1 rounded text-xs font-medium"
-                            style={{
+                            style={{ 
                               backgroundColor: 'rgba(20, 184, 166, 0.1)',
                               color: '#14B8A6'
                             }}
@@ -791,9 +685,9 @@ export default function App() {
                     {state === 'processing' ? (
                       <>
                         <Loader2 className="animate-spin" size={16} style={{ color: '#14B8A6' }} />
-                        <span
+                        <span 
                           className="rounded-full px-3 py-1"
-                          style={{
+                          style={{ 
                             backgroundColor: 'rgba(20, 184, 166, 0.1)',
                             color: '#14B8A6',
                             fontSize: '12px',
@@ -806,9 +700,9 @@ export default function App() {
                     ) : (
                       <>
                         <CheckCircle2 size={16} style={{ color: '#22C55E' }} />
-                        <span
+                        <span 
                           className="rounded-full px-3 py-1"
-                          style={{
+                          style={{ 
                             backgroundColor: 'rgba(34, 197, 94, 0.1)',
                             color: '#22C55E',
                             fontSize: '12px',
@@ -826,7 +720,7 @@ export default function App() {
                       <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '16px' }}>
                         Draft persona generated successfully.
                       </p>
-
+                      
                       {uploadedFiles.length < MAX_FILES && (
                         <>
                           <input
@@ -865,9 +759,9 @@ export default function App() {
                   transition={{ duration: 0.3, delay: 0.2 }}
                   className="lg:col-span-3"
                 >
-                  <div
+                  <div 
                     className="bg-white rounded-xl transition-all duration-300"
-                    style={{
+                    style={{ 
                       boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.05)',
                       padding: '24px',
                       border: '1px solid rgba(20, 184, 166, 0.3)'
@@ -882,10 +776,10 @@ export default function App() {
                     }}
                   >
                     <div className="flex items-center justify-between mb-6">
-                      <h3
-                        style={{
-                          fontSize: '20px',
-                          fontWeight: 700,
+                      <h3 
+                        style={{ 
+                          fontSize: '20px', 
+                          fontWeight: 700, 
                           color: '#14B8A6',
                           transition: 'filter 0.3s ease'
                         }}
@@ -975,7 +869,7 @@ export default function App() {
                             className="w-16 h-16 rounded-full object-cover flex-shrink-0"
                           />
                         ) : (
-                          <div
+                          <div 
                             className="w-16 h-16 rounded-full flex items-center justify-center flex-shrink-0"
                             style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '24px', fontWeight: 600 }}
                           >
@@ -1048,9 +942,9 @@ export default function App() {
                         <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937' }}>
                           Professional Summary
                         </h4>
-                        <span
+                        <span 
                           className="rounded-full px-2 py-1"
-                          style={{
+                          style={{ 
                             backgroundColor: 'rgba(20, 184, 166, 0.1)',
                             color: '#14B8A6',
                             fontSize: '12px',
@@ -1091,10 +985,10 @@ export default function App() {
                       </h4>
                       <div className="flex flex-wrap gap-2">
                         {personaData.skills.map((skill, idx) => (
-                          <span
+                          <span 
                             key={idx}
                             className="rounded-full px-3 py-1.5 flex items-center gap-2 group"
-                            style={{
+                            style={{ 
                               backgroundColor: '#F3F4F6',
                               color: '#1F2937',
                               fontSize: '12px',
@@ -1175,7 +1069,7 @@ export default function App() {
                       </h4>
                       <div className="space-y-4">
                         {personaData.experiences.map((exp) => (
-                          <div
+                          <div 
                             key={exp.id}
                             className="pb-4 group"
                             style={{ borderBottom: '1px solid #D1D5DB' }}
@@ -1189,7 +1083,7 @@ export default function App() {
                                       value={exp.role}
                                       onChange={(e) => {
                                         const value = e.target.value;
-                                        const updated = personaData.experiences.map(item =>
+                                        const updated = personaData.experiences.map(item => 
                                           item.id === exp.id ? { ...item, role: value } : item
                                         );
                                         setPersonaData({ ...personaData, experiences: updated });
@@ -1208,7 +1102,7 @@ export default function App() {
                                       value={exp.company}
                                       onChange={(e) => {
                                         const value = e.target.value;
-                                        const updated = personaData.experiences.map(item =>
+                                        const updated = personaData.experiences.map(item => 
                                           item.id === exp.id ? { ...item, company: value } : item
                                         );
                                         setPersonaData({ ...personaData, experiences: updated });
@@ -1240,7 +1134,7 @@ export default function App() {
                                     value={exp.date}
                                     onChange={(e) => {
                                       const value = e.target.value;
-                                      const updated = personaData.experiences.map(item =>
+                                      const updated = personaData.experiences.map(item => 
                                         item.id === exp.id ? { ...item, date: value } : item
                                       );
                                       setPersonaData({ ...personaData, experiences: updated });
@@ -1275,7 +1169,7 @@ export default function App() {
                                 value={exp.description}
                                 onChange={(e) => {
                                   const value = e.target.value;
-                                  const updated = personaData.experiences.map(item =>
+                                  const updated = personaData.experiences.map(item => 
                                     item.id === exp.id ? { ...item, description: value } : item
                                   );
                                   setPersonaData({ ...personaData, experiences: updated });
@@ -1339,7 +1233,7 @@ export default function App() {
                           <div
                             key={idx}
                             className="p-3 rounded-lg border flex items-start gap-2"
-                            style={{
+                            style={{ 
                               borderColor: '#D1D5DB',
                               backgroundColor: '#FAFAFA'
                             }}
@@ -1366,7 +1260,7 @@ export default function App() {
                   exit={{ y: 100, opacity: 0 }}
                   transition={{ duration: 0.3 }}
                   className="fixed bottom-0 left-0 right-0 bg-white border-t"
-                  style={{
+                  style={{ 
                     borderColor: '#D1D5DB',
                     padding: '16px 32px',
                     boxShadow: '0px -4px 12px rgba(0, 0, 0, 0.05)'
@@ -1423,37 +1317,37 @@ export default function App() {
             className="max-w-4xl mx-auto"
           >
             <button
-              onClick={() => setState('draft')}
-              className="mb-6 flex items-center gap-2 transition-all duration-200 hover:opacity-80"
-              style={{
-                color: '#14B8A6',
-                fontWeight: 500,
-                fontSize: '14px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer'
-              }}
-            >
-              ← Go Back
-            </button>
-            <h2
-              onMouseEnter={(e) => {
-                setIsHoveringHeading(true);
-                e.currentTarget.style.filter = 'drop-shadow(0 0 8px rgba(20, 184, 166, 0.4))';
-              }}
-              onMouseLeave={(e) => {
-                setIsHoveringHeading(false);
-                e.currentTarget.style.filter = 'none';
-              }}
+  onClick={() => setState('draft')}
+  className="mb-6 flex items-center gap-2 transition-all duration-200 hover:opacity-80"
+  style={{
+    color: '#14B8A6',
+    fontWeight: 500,
+    fontSize: '14px',
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer'
+  }}
+>
+  ← Go Back
+</button>
+            <h2 
+              onMouseEnter={() => setIsHoveringHeading(true)}
+              onMouseLeave={() => setIsHoveringHeading(false)}
               className="relative inline-block cursor-default mx-auto"
-              style={{
-                fontSize: '32px',
-                fontWeight: 700,
-                color: '#14B8A6',
-                marginBottom: '32px',
+              style={{ 
+                fontSize: '32px', 
+                fontWeight: 700, 
+                color: '#14B8A6', 
+                marginBottom: '32px', 
                 textAlign: 'center',
                 display: 'block',
                 transition: 'filter 0.3s ease'
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.filter = 'drop-shadow(0 0 8px rgba(20, 184, 166, 0.4))';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.filter = 'none';
               }}
             >
               Finalized Persona
@@ -1477,12 +1371,12 @@ export default function App() {
               )}
             </h2>
 
-            <motion.div
+            <motion.div 
               initial={{ opacity: 0, scale: 0.98 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.3, delay: 0.1 }}
               className="bg-white rounded-xl transition-all duration-300"
-              style={{
+              style={{ 
                 boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.05)',
                 padding: '32px',
                 border: '1px solid rgba(20, 184, 166, 0.3)'
@@ -1503,7 +1397,7 @@ export default function App() {
                     className="w-20 h-20 rounded-full object-cover flex-shrink-0"
                   />
                 ) : (
-                  <div
+                  <div 
                     className="w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0"
                     style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '28px', fontWeight: 600 }}
                   >
@@ -1537,10 +1431,10 @@ export default function App() {
                 </h4>
                 <div className="flex flex-wrap gap-2">
                   {personaData.skills.map((skill, idx) => (
-                    <span
+                    <span 
                       key={idx}
                       className="rounded-full px-3 py-1.5"
-                      style={{
+                      style={{ 
                         backgroundColor: '#F3F4F6',
                         color: '#1F2937',
                         fontSize: '12px',
@@ -1592,7 +1486,7 @@ export default function App() {
                     <div
                       key={idx}
                       className="p-3 rounded-lg border flex items-start gap-2"
-                      style={{
+                      style={{ 
                         borderColor: '#D1D5DB',
                         backgroundColor: '#FAFAFA'
                       }}
