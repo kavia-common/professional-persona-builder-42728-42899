@@ -87,13 +87,13 @@ function isNonEmptyObject(value: unknown): value is Record<string, unknown> {
  */
 function getInitials(label: string): string {
   const base = label.trim();
-  if (!base) return '\u2022';
+  if (!base) return '•';
   const parts = base.split(/\s+/).filter(Boolean);
   const initials = parts
     .slice(0, 2)
     .map((p) => p[0]?.toUpperCase())
     .join('');
-  return initials || '\u2022';
+  return initials || '•';
 }
 
 function getNestedOrchestrationValue(
@@ -244,6 +244,7 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
    * We also keep compatibility with the older PersonaDraft fields if present (title, profile.headline),
    * but the requested stability fix is primarily about mapping the correct fields above.
    */
+  // eslint-disable-next-line no-console
   console.log('[persona][coerce] raw personaJson:', personaJson);
 
   try {
@@ -288,9 +289,11 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
       tools: tools.length > 0 ? tools : fallback.tools,
     };
 
+    // eslint-disable-next-line no-console
     console.log('[persona][coerce] result PersonaData:', result);
     return result;
   } catch (err) {
+    // eslint-disable-next-line no-console
     console.warn('[persona][coerce] coercion threw; returning fallback. err=', err);
     return fallback;
   }
@@ -446,21 +449,6 @@ export default function App() {
     return isValid;
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    // Prevent bubbling into any parent click handlers (and avoid any chance of recursive click loops).
-    e.stopPropagation();
-
-    if (!e.target.files) return;
-
-    const newFiles = Array.from(e.target.files);
-
-    // Important: reset the input so selecting the same file again still fires onChange.
-    // This avoids users repeatedly clicking/dragging thinking nothing happened.
-    e.target.value = '';
-
-    addFiles(newFiles);
-  };
-
   const addFiles = (files: File[]) => {
     // Avoid calling setState from inside other state updaters (can create confusing re-entrancy patterns).
     setUploadError('');
@@ -488,6 +476,21 @@ export default function App() {
     setUploadedFiles((prev) => [...prev, ...newUploadedFiles]);
   };
 
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    // Prevent bubbling into any parent click handlers (and avoid any chance of recursive click loops).
+    e.stopPropagation();
+
+    if (!e.target.files) return;
+
+    const newFiles = Array.from(e.target.files);
+
+    // Important: reset the input so selecting the same file again still fires onChange.
+    // This avoids users repeatedly clicking/dragging thinking nothing happened.
+    e.target.value = '';
+
+    addFiles(newFiles);
+  };
+
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     if (e.dataTransfer.files) {
@@ -507,6 +510,7 @@ export default function App() {
 
   const handleGenerateDraft = async () => {
     const generationId = ++generationIdRef.current;
+    // eslint-disable-next-line no-console
     console.log(`[draft][gen:${generationId}] handleGenerateDraft start`, {
       state,
       uploadedFilesCount: uploadedFiles.length,
@@ -530,6 +534,7 @@ export default function App() {
 
       const files = uploadedFiles.map((f) => f.file);
 
+      // eslint-disable-next-line no-console
       console.log(`[draft][gen:${generationId}] uploading documents`, {
         fileCount: files.length,
         names: files.map((f) => f.name),
@@ -540,6 +545,7 @@ export default function App() {
       // We still need to upload to establish latest docs on the backend; orchestration can then pick them up.
       await import('../lib/apiClient').then(async ({ uploadDocuments }) => {
         const uploadResp = await uploadDocuments({ files });
+        // eslint-disable-next-line no-console
         console.log(`[draft][gen:${generationId}] uploadDocuments raw response:`, uploadResp);
       });
 
@@ -555,11 +561,13 @@ export default function App() {
       };
 
       // Requested explicit logging for the orchestration call.
+      // eslint-disable-next-line no-console
       console.log(`[orchestrationRunAll][gen:${generationId}] request:`, runAllRequest);
 
       const runAll = await orchestrationRunAll(runAllRequest);
 
       // Requested explicit logging for the orchestration response.
+      // eslint-disable-next-line no-console
       console.log(`[orchestrationRunAll][gen:${generationId}] response:`, runAll);
 
       setBuildId(runAll.build.id);
@@ -576,9 +584,11 @@ export default function App() {
       // If the backend already produced persona artifacts immediately, we can enter draft state.
       // Otherwise we keep "processing" and let polling transition us.
       if (runAll.build.status === 'succeeded') {
+        // eslint-disable-next-line no-console
         console.log(`[draft][gen:${generationId}] build already succeeded; entering draft state`);
         setState('draft');
       } else {
+        // eslint-disable-next-line no-console
         console.log(`[draft][gen:${generationId}] build not yet succeeded; remain processing`, {
           status: runAll.build.status,
           progress: runAll.build.progress,
@@ -589,11 +599,10 @@ export default function App() {
     } catch (e: any) {
       // Surface backend errors in UI (including payload details) instead of silently resetting.
       const payloadMsg =
-        e?.payload && typeof e.payload === 'object' && e.payload !== null
-          ? e.payload?.message || e.payload?.error
-          : null;
+        e?.payload && typeof e.payload === 'object' && e.payload !== null ? e.payload?.message || e.payload?.error : null;
 
       const message = payloadMsg || e?.message || 'Failed to generate draft persona.';
+      // eslint-disable-next-line no-console
       console.error(`[draft][gen:${generationId}] generate draft failed`, { message, error: e });
 
       setBackendError(message);
@@ -650,10 +659,12 @@ export default function App() {
     setVersionsError('');
     try {
       const resp = await listPersonaVersions(id);
+      // eslint-disable-next-line no-console
       console.log('[versions] listPersonaVersions raw response:', resp);
       const sorted = [...resp.versions].sort((a, b) => b.version - a.version);
       setVersions(sorted);
     } catch (e: any) {
+      // eslint-disable-next-line no-console
       console.error('[versions] listPersonaVersions failed:', e);
       setVersionsError(e?.message || 'Failed to load version history.');
     } finally {
@@ -672,11 +683,13 @@ export default function App() {
 
     if (isMountedRef.current) setIsPolling(true);
 
+    // eslint-disable-next-line no-console
     console.log(`[poll][gen:${generationId}] starting polling`, { buildId, state });
 
     const interval = setInterval(async () => {
       try {
         const status = await getBuildStatus(buildId);
+        // eslint-disable-next-line no-console
         console.log(`[poll][gen:${generationId}] getBuildStatus raw response:`, status);
 
         if (cancelled || !isMountedRef.current) return;
@@ -684,16 +697,13 @@ export default function App() {
         setBuildStatus(status);
 
         if (status.status === 'succeeded') {
+          // eslint-disable-next-line no-console
           console.log(`[poll][gen:${generationId}] build succeeded; transitioning state -> draft`, status);
           setState('draft');
         } else if (status.status === 'failed' || status.status === 'cancelled') {
           // IMPORTANT: do not fail silently; log message
-          console.error(
-            `[poll][gen:${generationId}] build ${status.status}; message=`,
-            status.message,
-            'full status=',
-            status
-          );
+          // eslint-disable-next-line no-console
+          console.error(`[poll][gen:${generationId}] build ${status.status}; message=`, status.message, 'full status=', status);
           setBackendError(status.message || `Build ${status.status}.`);
           setHasError(true);
 
@@ -706,11 +716,10 @@ export default function App() {
         if (cancelled || !isMountedRef.current) return;
 
         const payloadMsg =
-          e?.payload && typeof e.payload === 'object' && e.payload !== null
-            ? e.payload?.message || e.payload?.error
-            : null;
+          e?.payload && typeof e.payload === 'object' && e.payload !== null ? e.payload?.message || e.payload?.error : null;
 
         const message = payloadMsg || e?.message || 'Failed to poll build status.';
+        // eslint-disable-next-line no-console
         console.error(`[poll][gen:${generationId}] polling error`, { message, error: e });
 
         setBackendError(message);
@@ -725,6 +734,7 @@ export default function App() {
       cancelled = true;
       if (isMountedRef.current) setIsPolling(false);
       clearInterval(interval);
+      // eslint-disable-next-line no-console
       console.log(`[poll][gen:${generationId}] stopped polling (cleanup)`, { buildId });
     };
     // IMPORTANT: keep dependencies primitive to avoid object-identity loops.
@@ -748,6 +758,7 @@ export default function App() {
     const generationId = generationIdRef.current;
     let cancelled = false;
 
+    // eslint-disable-next-line no-console
     console.log(`[artifacts][gen:${generationId}] entering draft; fetching orchestration artifacts`, { buildId });
 
     (async () => {
@@ -755,11 +766,14 @@ export default function App() {
         const { getOrchestrationByBuild } = await import('../lib/apiClient');
 
         // Requested explicit logging for orchestration artifact fetch.
+        // eslint-disable-next-line no-console
         console.log(`[getOrchestrationByBuild][gen:${generationId}] request:`, { buildId });
 
         const orch = await getOrchestrationByBuild(buildId);
 
+        // eslint-disable-next-line no-console
         console.log(`[getOrchestrationByBuild][gen:${generationId}] response:`, orch);
+        // eslint-disable-next-line no-console
         console.log(`[artifacts][gen:${generationId}] getOrchestrationByBuild raw response:`, orch);
 
         // Key-logging requested in task (helps debug where persona draft actually lives).
@@ -776,6 +790,7 @@ export default function App() {
             ? safeJsonStringify(personaJson).slice(0, 600)
             : String(personaJson).slice(0, 200);
 
+        // eslint-disable-next-line no-console
         console.log(`[artifacts][gen:${generationId}] extracted personaJson`, {
           sourcePath: extracted.sourcePath,
           personaJsonType: personaJson === null ? 'null' : Array.isArray(personaJson) ? 'array' : typeof personaJson,
@@ -783,6 +798,7 @@ export default function App() {
         });
 
         if (!personaJson) {
+          // eslint-disable-next-line no-console
           console.warn(
             `[artifacts][gen:${generationId}] no personaJson found in orchestration record; UI will keep fallback personaData. sourcePath=`,
             extracted.sourcePath,
@@ -794,6 +810,7 @@ export default function App() {
 
         // Guard: ensure we have a plausible object to coerce.
         if (!isNonEmptyObject(personaJson)) {
+          // eslint-disable-next-line no-console
           console.warn(
             `[artifacts][gen:${generationId}] personaJson found but is empty/non-object; ignoring to prevent flicker/reversion`,
             { sourcePath: extracted.sourcePath, personaJsonType: typeof personaJson, personaJson }
@@ -805,6 +822,7 @@ export default function App() {
         const artifactJson = safeJsonStringify(personaJson);
         const lastJson = lastAppliedPersonaArtifactJsonRef.current[buildId] ?? '';
         if (artifactJson === lastJson) {
+          // eslint-disable-next-line no-console
           console.log(
             `[artifacts][gen:${generationId}] persona artifact unchanged for build; skipping coercion + setPersonaData to avoid loops`,
             { buildId, sourcePath: extracted.sourcePath }
@@ -813,6 +831,7 @@ export default function App() {
         }
         lastAppliedPersonaArtifactJsonRef.current[buildId] = artifactJson;
 
+        // eslint-disable-next-line no-console
         console.log(`[artifacts][gen:${generationId}] personaJson extracted (pre-coerce):`, personaJson);
 
         setPersonaData((prev) => {
@@ -826,33 +845,42 @@ export default function App() {
           // Deep equality guard (per user_input_ref) to prevent infinite render loops.
           // Only apply the state update if the actual JSON content changed.
           if (JSON.stringify(coerced) === JSON.stringify(prev)) {
+            // eslint-disable-next-line no-console
             console.log(
               `[artifacts][gen:${generationId}] personaData is deep-equal to previous state; skipping update to prevent render loop.`
             );
             return prev;
           }
 
+          // eslint-disable-next-line no-console
           console.log(`[artifacts][gen:${generationId}] Coerced personaData for update:`);
           // Per user request, log the coerced data in a structured table for verification.
           try {
+            // eslint-disable-next-line no-console
             console.table(coerced);
           } catch (e) {
+            // eslint-disable-next-line no-console
             console.log('[debug] console.table failed, logging object instead', coerced);
           }
 
+          // eslint-disable-next-line no-console
           console.log(`[artifacts][gen:${generationId}] personaData updated from backend artifacts (JSON diff changed)`);
           return coerced;
         });
       } catch (err) {
         // best-effort only; ignore, but log for diagnostics
+        // eslint-disable-next-line no-console
         console.error(`[artifacts][gen:${generationId}] artifact fetch failed`, err);
+        // eslint-disable-next-line no-console
         console.error(`[artifacts][gen:${generationId}] artifact fetch failed message:`, getErrorMessage(err));
+        // eslint-disable-next-line no-console
         console.error(`[artifacts][gen:${generationId}] artifact fetch failed details:`, safeJsonStringify(err));
       }
     })();
 
     return () => {
       cancelled = true;
+      // eslint-disable-next-line no-console
       console.log(`[artifacts][gen:${generationId}] cleanup (cancelled)`, { buildId });
     };
     // initialPersonaFallback is stable (memo []), buildId/state are primitives.
@@ -952,19 +980,19 @@ export default function App() {
 
   return (
     <div
-      className=\"min-h-screen\"
+      className="min-h-screen"
       style={{
         background: 'linear-gradient(180deg, rgba(79, 70, 229, 0.06) 0%, #F9FAFB 55%, #F9FAFB 100%)',
         fontFamily: 'Inter, sans-serif',
       }}
     >
       {/* Header */}
-      <header className=\"bg-white border-b\" style={{ borderColor: '#D1D5DB' }}>
-        <div style={{ padding: '16px 32px' }} className=\"flex items-center justify-between\">
+      <header className="bg-white border-b" style={{ borderColor: '#D1D5DB' }}>
+        <div style={{ padding: '16px 32px' }} className="flex items-center justify-between">
           {/* LEFT - Logo */}
-          <div className=\"flex items-center gap-3\">
+          <div className="flex items-center gap-3">
             <div
-              className=\"w-9 h-9 rounded-lg flex items-center justify-center\"
+              className="w-9 h-9 rounded-lg flex items-center justify-center"
               style={{
                 backgroundColor: '#14B8A6',
                 boxShadow: '0 2px 4px rgba(20, 184, 166, 0.15)',
@@ -976,17 +1004,17 @@ export default function App() {
           </div>
 
           {/* RIGHT - Profile Circle */}
-          <div className=\"relative\">
+          <div className="relative">
             <button
               onClick={() => setIsProfileOpen(!isProfileOpen)}
-              className=\"w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200\"
+              className="w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200"
               style={{
                 backgroundColor: '#14B8A6',
                 color: 'white',
                 fontSize: '14px',
                 fontWeight: 600,
               }}
-              aria-label=\"Open profile menu\"
+              aria-label="Open profile menu"
               title={personaName || personaTitle || 'Profile'}
             >
               {avatarInitials}
@@ -999,14 +1027,14 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -10 }}
                   transition={{ duration: 0.2 }}
-                  className=\"absolute right-0 mt-2 w-40 bg-white rounded-lg\"
+                  className="absolute right-0 mt-2 w-40 bg-white rounded-lg"
                   style={{
                     border: '1px solid #D1D5DB',
                     boxShadow: '0 8px 20px rgba(0, 0, 0, 0.08)',
                   }}
                 >
-                  <button className=\"w-full text-left px-4 py-2 hover:bg-gray-50\">Profile Settings</button>
-                  <button className=\"w-full text-left px-4 py-2 hover:bg-gray-50 text-red-600\">Logout</button>
+                  <button className="w-full text-left px-4 py-2 hover:bg-gray-50">Profile Settings</button>
+                  <button className="w-full text-left px-4 py-2 hover:bg-gray-50 text-red-600">Logout</button>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -1015,11 +1043,11 @@ export default function App() {
       </header>
 
       {/* Step Progress */}
-      <div className=\"bg-white\" style={{ padding: '24px 32px', borderBottom: '1px solid #D1D5DB' }}>
-        <div className=\"flex items-center justify-center gap-4 max-w-3xl mx-auto\">
-          <div className=\"flex items-center gap-3\">
+      <div className="bg-white" style={{ padding: '24px 32px', borderBottom: '1px solid #D1D5DB' }}>
+        <div className="flex items-center justify-center gap-4 max-w-3xl mx-auto">
+          <div className="flex items-center gap-3">
             <div
-              className=\"w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300\"
+              className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300"
               style={{
                 backgroundColor: step1Complete ? '#14B8A6' : currentStep === 1 ? '#14B8A6' : 'transparent',
                 border: step1Complete || currentStep === 1 ? 'none' : '2px solid #D1D5DB',
@@ -1041,11 +1069,11 @@ export default function App() {
             </span>
           </div>
 
-          <div className=\"h-0.5 w-12 transition-colors duration-300\" style={{ backgroundColor: step1Complete ? '#14B8A6' : '#D1D5DB' }} />
+          <div className="h-0.5 w-12 transition-colors duration-300" style={{ backgroundColor: step1Complete ? '#14B8A6' : '#D1D5DB' }} />
 
-          <div className=\"flex items-center gap-3\">
+          <div className="flex items-center gap-3">
             <div
-              className=\"w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300\"
+              className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300"
               style={{
                 backgroundColor: step2Complete ? '#14B8A6' : currentStep === 2 ? '#14B8A6' : 'transparent',
                 border: step2Complete || currentStep === 2 ? 'none' : '2px solid #D1D5DB',
@@ -1067,11 +1095,11 @@ export default function App() {
             </span>
           </div>
 
-          <div className=\"h-0.5 w-12 transition-colors duration-300\" style={{ backgroundColor: step2Complete ? '#14B8A6' : '#D1D5DB' }} />
+          <div className="h-0.5 w-12 transition-colors duration-300" style={{ backgroundColor: step2Complete ? '#14B8A6' : '#D1D5DB' }} />
 
-          <div className=\"flex items-center gap-3\">
+          <div className="flex items-center gap-3">
             <div
-              className=\"w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300\"
+              className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300"
               style={{
                 backgroundColor: step3Complete ? '#14B8A6' : currentStep === 3 ? '#14B8A6' : 'transparent',
                 border: step3Complete || currentStep === 3 ? 'none' : '2px solid #D1D5DB',
@@ -1099,12 +1127,12 @@ export default function App() {
       <main style={{ padding: state === 'finalized' ? '48px 32px' : '48px 32px' }}>
         {/* Initial State */}
         {state === 'initial' && (
-          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className=\"max-w-2xl mx-auto text-center\">
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="max-w-2xl mx-auto text-center">
             <motion.h2
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.3, delay: 0.1 }}
-              className=\"relative inline-block cursor-default\"
+              className="relative inline-block cursor-default"
               style={{
                 fontSize: '36px',
                 fontWeight: 700,
@@ -1113,15 +1141,15 @@ export default function App() {
                 transition: 'color 0.3s ease',
               }}
             >
-              <span className=\"upload-heading-underline\">View Current State Persona</span>
+              <span className="upload-heading-underline">View Current State Persona</span>
             </motion.h2>
             <p style={{ fontSize: '16px', color: '#6B7280', marginBottom: '32px' }}>Upload your Professional Documents to generate your AI-powered Persona</p>
 
             {/* Keep the file input OUTSIDE the clickable dropzone to avoid self-trigger loops */}
-            <input ref={fileInputRef} type=\"file\" accept=\".pdf,.docx,.txt\" multiple onChange={handleFileChange} className=\"hidden\" />
+            <input ref={fileInputRef} type="file" accept=".pdf,.docx,.txt" multiple onChange={handleFileChange} className="hidden" />
 
             <div
-              className=\"bg-white rounded-xl p-8 transition-all duration-300 group\"
+              className="bg-white rounded-xl p-8 transition-all duration-300 group"
               style={{
                 boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.05)',
                 marginBottom: '24px',
@@ -1140,16 +1168,16 @@ export default function App() {
               <div
                 onDrop={handleDrop}
                 onDragOver={handleDragOver}
-                className=\"border-2 border-dashed rounded-xl p-12 transition-colors hover:bg-gray-50\"
+                className="border-2 border-dashed rounded-xl p-12 transition-colors hover:bg-gray-50"
                 style={{
                   borderColor: '#D1D5DB',
                   backgroundColor: uploadedFiles.length > 0 ? 'rgba(20, 184, 166, 0.05)' : 'transparent',
                 }}
                 // Drag/drop only: do NOT make this div clickable to avoid recursive click loops/freezes.
-                role=\"region\"
-                aria-label=\"Upload documents (drag and drop)\"
+                role="region"
+                aria-label="Upload documents (drag and drop)"
               >
-                <Upload className=\"mx-auto mb-4\" size={48} style={{ color: '#14B8A6' }} />
+                <Upload className="mx-auto mb-4" size={48} style={{ color: '#14B8A6' }} />
                 <p style={{ fontSize: '16px', fontWeight: 500, color: '#1F2937', marginBottom: '8px' }}>
                   {uploadedFiles.length > 0 ? `${uploadedFiles.length} file(s) uploaded` : 'Upload your Documents '}
                 </p>
@@ -1159,12 +1187,12 @@ export default function App() {
                 </p>
 
                 <button
-                  type=\"button\"
+                  type="button"
                   onClick={(e) => {
                     e.stopPropagation();
                     fileInputRef.current?.click();
                   }}
-                  className=\"inline-flex items-center justify-center rounded-lg transition-all duration-200\"
+                  className="inline-flex items-center justify-center rounded-lg transition-all duration-200"
                   style={{
                     backgroundColor: '#14B8A6',
                     color: 'white',
@@ -1201,19 +1229,19 @@ export default function App() {
               )}
 
               {uploadedFiles.length > 0 && (
-                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className=\"mt-6 space-y-2\">
+                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="mt-6 space-y-2">
                   {uploadedFiles.map((fileData) => (
                     <div
                       key={fileData.id}
-                      className=\"flex items-center justify-between p-3 rounded-lg bg-gray-50 hover:bg-gray-100 transition-colors\"
+                      className="flex items-center justify-between p-3 rounded-lg bg-gray-50 hover:bg-gray-100 transition-colors"
                       onClick={(e) => {
                         // This row should not re-open the file picker if clicked.
                         e.stopPropagation();
                       }}
                     >
-                      <div className=\"flex items-center gap-3\">
+                      <div className="flex items-center gap-3">
                         <span
-                          className=\"px-2 py-1 rounded text-xs font-medium\"
+                          className="px-2 py-1 rounded text-xs font-medium"
                           style={{
                             backgroundColor: 'rgba(20, 184, 166, 0.1)',
                             color: '#14B8A6',
@@ -1229,7 +1257,7 @@ export default function App() {
                           e.stopPropagation();
                           removeFile(fileData.id);
                         }}
-                        className=\"p-1 rounded hover:bg-gray-200 transition-colors\"
+                        className="p-1 rounded hover:bg-gray-200 transition-colors"
                         style={{ color: '#6B7280' }}
                       >
                         <X size={16} />
@@ -1243,7 +1271,7 @@ export default function App() {
             <button
               onClick={handleGenerateDraft}
               disabled={uploadedFiles.length === 0}
-              className=\"rounded-lg transition-all duration-200\"
+              className="rounded-lg transition-all duration-200"
               style={{
                 backgroundColor: uploadedFiles.length > 0 ? '#14B8A6' : '#D1D5DB',
                 color: uploadedFiles.length > 0 ? 'white' : '#6B7280',
@@ -1275,7 +1303,7 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ duration: 0.3 }}
-            className=\"max-w-7xl mx-auto\"
+            className="max-w-7xl mx-auto"
             style={{ paddingBottom: isEditable && state === 'draft' ? '100px' : '0' }}
           >
             <motion.h2
@@ -1284,7 +1312,7 @@ export default function App() {
               transition={{ duration: 0.3 }}
               onMouseEnter={() => setIsHoveringHeading(true)}
               onMouseLeave={() => setIsHoveringHeading(false)}
-              className=\"relative inline-block cursor-default mx-auto\"
+              className="relative inline-block cursor-default mx-auto"
               style={{
                 fontSize: state === 'draft' ? '36px' : '32px',
                 fontWeight: 700,
@@ -1316,13 +1344,18 @@ export default function App() {
               )}
             </motion.h2>
 
-            <div className=\"grid grid-cols-1 lg:grid-cols-5 gap-8\">
+            <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
               {/* Left Column - Upload Status */}
-              <motion.div initial={{ x: state === 'draft' ? 0 : -20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} transition={{ duration: 0.3, delay: 0.1, ease: 'easeInOut' }} className=\"lg:col-span-2\">
+              <motion.div
+                initial={{ x: state === 'draft' ? 0 : -20, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                transition={{ duration: 0.3, delay: 0.1, ease: 'easeInOut' }}
+                className="lg:col-span-2"
+              >
                 {state === 'draft' && (
                   <button
                     onClick={() => setState('initial')}
-                    className=\"mb-4 flex items-center gap-2 transition-all duration-200 hover:opacity-80\"
+                    className="mb-4 flex items-center gap-2 transition-all duration-200 hover:opacity-80"
                     style={{
                       color: '#14B8A6',
                       fontWeight: 500,
@@ -1332,11 +1365,11 @@ export default function App() {
                       cursor: 'pointer',
                     }}
                   >
-                    &#x2190; Go Back
+                    ← Go Back
                   </button>
                 )}
                 <div
-                  className=\"bg-white rounded-xl transition-all duration-300\"
+                  className="bg-white rounded-xl transition-all duration-300"
                   style={{
                     boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.05)',
                     padding: '24px',
@@ -1353,17 +1386,17 @@ export default function App() {
                 >
                   <h3 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '16px' }}>Uploaded Documents</h3>
 
-                  <div className=\"space-y-3 mb-6\">
+                  <div className="space-y-3 mb-6">
                     {uploadedFiles.map((fileData) => (
-                      <div key={fileData.id} className=\"flex items-center justify-between p-3 rounded-lg bg-gray-50\">
-                        <div className=\"flex items-center gap-3\">
-                          <span className=\"px-2 py-1 rounded text-xs font-medium\" style={{ backgroundColor: 'rgba(20, 184, 166, 0.1)', color: '#14B8A6' }}>
+                      <div key={fileData.id} className="flex items-center justify-between p-3 rounded-lg bg-gray-50">
+                        <div className="flex items-center gap-3">
+                          <span className="px-2 py-1 rounded text-xs font-medium" style={{ backgroundColor: 'rgba(20, 184, 166, 0.1)', color: '#14B8A6' }}>
                             {getFileType(fileData.file.name)}
                           </span>
                           <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>{fileData.file.name}</span>
                         </div>
                         {state === 'draft' && (
-                          <button onClick={() => removeFile(fileData.id)} className=\"p-1 rounded hover:bg-gray-200 transition-colors\" style={{ color: '#6B7280' }}>
+                          <button onClick={() => removeFile(fileData.id)} className="p-1 rounded hover:bg-gray-200 transition-colors" style={{ color: '#6B7280' }}>
                             <X size={16} />
                           </button>
                         )}
@@ -1371,12 +1404,12 @@ export default function App() {
                     ))}
                   </div>
 
-                  <div className=\"flex items-center gap-2 mb-3\">
+                  <div className="flex items-center gap-2 mb-3">
                     {state === 'processing' ? (
                       <>
-                        <Loader2 className=\"animate-spin\" size={16} style={{ color: '#14B8A6' }} />
+                        <Loader2 className="animate-spin" size={16} style={{ color: '#14B8A6' }} />
                         <span
-                          className=\"rounded-full px-3 py-1\"
+                          className="rounded-full px-3 py-1"
                           style={{
                             backgroundColor: 'rgba(20, 184, 166, 0.1)',
                             color: '#14B8A6',
@@ -1384,14 +1417,14 @@ export default function App() {
                             fontWeight: 500,
                           }}
                         >
-                          {buildStatus ? `Processing (${buildStatus.progress}%)${buildStatus.currentStep ? ` \u00b7 ${buildStatus.currentStep}` : ''}` : 'Processing...'}
+                          {buildStatus ? `Processing (${buildStatus.progress}%)${buildStatus.currentStep ? ` · ${buildStatus.currentStep}` : ''}` : 'Processing...'}
                         </span>
                       </>
                     ) : (
                       <>
                         <CheckCircle2 size={16} style={{ color: '#22C55E' }} />
                         <span
-                          className=\"rounded-full px-3 py-1\"
+                          className="rounded-full px-3 py-1"
                           style={{
                             backgroundColor: 'rgba(34, 197, 94, 0.1)',
                             color: '#22C55E',
@@ -1408,7 +1441,7 @@ export default function App() {
                   {/* Backend error banner (best-effort; shown where user is looking) */}
                   {backendError && (
                     <div
-                      className=\"mb-4 rounded-lg p-3\"
+                      className="mb-4 rounded-lg p-3"
                       style={{
                         backgroundColor: 'rgba(220, 38, 38, 0.08)',
                         border: '1px solid rgba(220, 38, 38, 0.25)',
@@ -1423,12 +1456,12 @@ export default function App() {
 
                   {/* Version history (if persona exists / backend configured) */}
                   {state === 'draft' && (
-                    <div className=\"mb-2\">
+                    <div className="mb-2">
                       <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '10px' }}>Version History</h4>
 
                       {isLoadingVersions ? (
-                        <div className=\"flex items-center gap-2\" style={{ color: '#6B7280', fontSize: '13px' }}>
-                          <Loader2 className=\"animate-spin\" size={14} />
+                        <div className="flex items-center gap-2" style={{ color: '#6B7280', fontSize: '13px' }}>
+                          <Loader2 className="animate-spin" size={14} />
                           Loading versions...
                         </div>
                       ) : versionsError ? (
@@ -1436,9 +1469,9 @@ export default function App() {
                       ) : versions.length === 0 ? (
                         <div style={{ color: '#6B7280', fontSize: '13px' }}>{personaId ? 'No versions found yet.' : 'No saved persona yet (versions available after save).'}</div>
                       ) : (
-                        <div className=\"space-y-2\">
+                        <div className="space-y-2">
                           {versions.slice(0, 5).map((v) => (
-                            <div key={v.id} className=\"flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2\">
+                            <div key={v.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
                               <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>v{v.version}</div>
                               <div style={{ fontSize: '12px', color: '#6B7280' }}>{new Date(v.createdAt).toLocaleString()}</div>
                             </div>
@@ -1454,10 +1487,10 @@ export default function App() {
 
                       {uploadedFiles.length < MAX_FILES && (
                         <>
-                          <input ref={additionalFileInputRef} type=\"file\" accept=\".pdf,.docx,.txt\" multiple onChange={handleFileChange} className=\"hidden\" />
+                          <input ref={additionalFileInputRef} type="file" accept=".pdf,.docx,.txt" multiple onChange={handleFileChange} className="hidden" />
                           <button
                             onClick={() => additionalFileInputRef.current?.click()}
-                            className=\"w-full flex items-center justify-center gap-2 rounded-lg border-2 border-dashed p-3 transition-colors hover:bg-gray-50\"
+                            className="w-full flex items-center justify-center gap-2 rounded-lg border-2 border-dashed p-3 transition-colors hover:bg-gray-50"
                             style={{
                               borderColor: '#D1D5DB',
                               color: '#6B7280',
@@ -1477,9 +1510,9 @@ export default function App() {
 
               {/* Right Column - Draft Persona */}
               {state === 'draft' && (
-                <motion.div initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} transition={{ duration: 0.3, delay: 0.2 }} className=\"lg:col-span-3\">
+                <motion.div initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} transition={{ duration: 0.3, delay: 0.2 }} className="lg:col-span-3">
                   <div
-                    className=\"bg-white rounded-xl transition-all duration-300\"
+                    className="bg-white rounded-xl transition-all duration-300"
                     style={{
                       boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.05)',
                       padding: '24px',
@@ -1494,7 +1527,7 @@ export default function App() {
                       e.currentTarget.style.boxShadow = '0px 4px 12px rgba(0, 0, 0, 0.05)';
                     }}
                   >
-                    <div className=\"flex items-center justify-between mb-6\">
+                    <div className="flex items-center justify-between mb-6">
                       <h3
                         style={{
                           fontSize: '20px',
@@ -1511,11 +1544,11 @@ export default function App() {
                       >
                         Draft Persona
                       </h3>
-                      <div className=\"flex items-center gap-2\">
+                      <div className="flex items-center gap-2">
                         {isEditable && (
                           <button
                             onClick={handleSaveChanges}
-                            className=\"flex items-center gap-2 rounded-lg transition-all duration-200\"
+                            className="flex items-center gap-2 rounded-lg transition-all duration-200"
                             style={{
                               padding: '8px 16px',
                               backgroundColor: '#14B8A6',
@@ -1541,7 +1574,7 @@ export default function App() {
                               animate={{ opacity: 1, x: 0 }}
                               exit={{ opacity: 0, x: -10 }}
                               transition={{ duration: 0.3 }}
-                              className=\"flex items-center gap-1.5\"
+                              className="flex items-center gap-1.5"
                               style={{
                                 fontSize: '14px',
                                 color: '#22C55E',
@@ -1555,7 +1588,7 @@ export default function App() {
                         </AnimatePresence>
                         <button
                           onClick={() => setIsEditable(!isEditable)}
-                          className=\"flex items-center gap-2 rounded-lg transition-colors\"
+                          className="flex items-center gap-2 rounded-lg transition-colors"
                           style={{
                             padding: '8px 16px',
                             backgroundColor: isEditable ? 'rgba(20, 184, 166, 0.1)' : 'transparent',
@@ -1572,14 +1605,14 @@ export default function App() {
                     </div>
 
                     {/* Persona Header */}
-                    <div className=\"flex items-center gap-4 mb-6 pb-6\" style={{ borderBottom: '1px solid #D1D5DB' }}>
-                      <div className=\"relative group\">
-                        <input ref={profileImageInputRef} type=\"file\" accept=\"image/*\" onChange={handleProfileImageChange} className=\"hidden\" />
+                    <div className="flex items-center gap-4 mb-6 pb-6" style={{ borderBottom: '1px solid #D1D5DB' }}>
+                      <div className="relative group">
+                        <input ref={profileImageInputRef} type="file" accept="image/*" onChange={handleProfileImageChange} className="hidden" />
                         {personaData?.profileImage ? (
-                          <img src={personaData.profileImage} alt=\"Profile\" className=\"w-16 h-16 rounded-full object-cover flex-shrink-0\" />
+                          <img src={personaData.profileImage} alt="Profile" className="w-16 h-16 rounded-full object-cover flex-shrink-0" />
                         ) : (
                           <div
-                            className=\"w-16 h-16 rounded-full flex items-center justify-center flex-shrink-0\"
+                            className="w-16 h-16 rounded-full flex items-center justify-center flex-shrink-0"
                             style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '24px', fontWeight: 600 }}
                           >
                             {personaCardInitials}
@@ -1588,7 +1621,7 @@ export default function App() {
                         {isEditable && (
                           <button
                             onClick={() => profileImageInputRef.current?.click()}
-                            className=\"absolute inset-0 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity\"
+                            className="absolute inset-0 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                             style={{
                               backgroundColor: 'rgba(0, 0, 0, 0.5)',
                             }}
@@ -1597,18 +1630,17 @@ export default function App() {
                           </button>
                         )}
                       </div>
-                      <div className=\"flex-1\">
+                      <div className="flex-1">
                         {isEditable ? (
                           <>
                             <input
-                              type=\"text\"
+                              type="text"
                               value={personaData?.name ?? ''}
                               onChange={(e) => {
-                                if (!personaData) return;
                                 setPersonaData({ ...personaData, name: e.target.value });
                                 setHasUnsavedChanges(true);
                               }}
-                              className=\"w-full mb-2 rounded-lg border\"
+                              className="w-full mb-2 rounded-lg border"
                               style={{
                                 padding: '8px 12px',
                                 borderColor: '#D1D5DB',
@@ -1618,14 +1650,13 @@ export default function App() {
                               }}
                             />
                             <input
-                              type=\"text\"
+                              type="text"
                               value={personaData?.title ?? ''}
                               onChange={(e) => {
-                                if (!personaData) return;
                                 setPersonaData({ ...personaData, title: e.target.value });
                                 setHasUnsavedChanges(true);
                               }}
-                              className=\"w-full rounded-lg border\"
+                              className="w-full rounded-lg border"
                               style={{
                                 padding: '8px 12px',
                                 borderColor: '#D1D5DB',
@@ -1644,11 +1675,11 @@ export default function App() {
                     </div>
 
                     {/* Professional Summary */}
-                    <div className=\"mb-6\">
-                      <div className=\"flex items-center justify-between mb-2\">
+                    <div className="mb-6">
+                      <div className="flex items-center justify-between mb-2">
                         <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937' }}>Professional Summary</h4>
                         <span
-                          className=\"rounded-full px-2 py-1\"
+                          className="rounded-full px-2 py-1"
                           style={{
                             backgroundColor: 'rgba(20, 184, 166, 0.1)',
                             color: '#14B8A6',
@@ -1663,12 +1694,11 @@ export default function App() {
                         <textarea
                           value={personaData?.summary ?? ''}
                           onChange={(e) => {
-                            if (!personaData) return;
                             setPersonaData({ ...personaData, summary: e.target.value });
                             setHasUnsavedChanges(true);
                           }}
                           rows={4}
-                          className=\"w-full rounded-lg border\"
+                          className="w-full rounded-lg border"
                           style={{
                             padding: '10px 12px',
                             borderColor: '#D1D5DB',
@@ -1683,13 +1713,13 @@ export default function App() {
                     </div>
 
                     {/* Skills */}
-                    <div className=\"mb-6\">
+                    <div className="mb-6">
                       <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Skills</h4>
-                      <div className=\"flex flex-wrap gap-2\">
+                      <div className="flex flex-wrap gap-2">
                         {(personaData?.skills ?? []).map((skill, idx) => (
                           <span
                             key={idx}
-                            className=\"rounded-full px-3 py-1.5 flex items-center gap-2 group\"
+                            className="rounded-full px-3 py-1.5 flex items-center gap-2 group"
                             style={{
                               backgroundColor: '#F3F4F6',
                               color: '#1F2937',
@@ -1699,7 +1729,7 @@ export default function App() {
                           >
                             {skill}
                             {isEditable && (
-                              <button onClick={() => removeSkill(skill)} className=\"opacity-60 hover:opacity-100\">
+                              <button onClick={() => removeSkill(skill)} className="opacity-60 hover:opacity-100">
                                 <X size={14} />
                               </button>
                             )}
@@ -1708,7 +1738,7 @@ export default function App() {
                         {isEditable && isAddingSkill && (
                           <input
                             ref={newSkillInputRef}
-                            type=\"text\"
+                            type="text"
                             value={newSkillValue}
                             onChange={(e) => setNewSkillValue(e.target.value)}
                             onKeyDown={(e) => {
@@ -1729,7 +1759,7 @@ export default function App() {
                               setIsAddingSkill(false);
                             }}
                             autoFocus
-                            className=\"rounded-full px-3 py-1.5 border\"
+                            className="rounded-full px-3 py-1.5 border"
                             style={{
                               borderColor: '#14B8A6',
                               fontSize: '12px',
@@ -1737,7 +1767,7 @@ export default function App() {
                               outline: 'none',
                               minWidth: '100px',
                             }}
-                            placeholder=\"Type skill...\"
+                            placeholder="Type skill..."
                           />
                         )}
                         {isEditable && !isAddingSkill && (
@@ -1746,7 +1776,7 @@ export default function App() {
                               setIsAddingSkill(true);
                               setTimeout(() => newSkillInputRef.current?.focus(), 0);
                             }}
-                            className=\"rounded-full px-3 py-1.5 flex items-center gap-1 border-2 border-dashed hover:bg-gray-50\"
+                            className="rounded-full px-3 py-1.5 flex items-center gap-1 border-2 border-dashed hover:bg-gray-50"
                             style={{
                               borderColor: '#D1D5DB',
                               color: '#6B7280',
@@ -1762,17 +1792,17 @@ export default function App() {
                     </div>
 
                     {/* Key Experiences */}
-                    <div className=\"mb-6\">
+                    <div className="mb-6">
                       <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Key Experiences</h4>
-                      <div className=\"space-y-4\">
+                      <div className="space-y-4">
                         {(personaData?.experiences ?? []).map((exp) => (
-                          <div key={exp.id} className=\"pb-4 group\" style={{ borderBottom: '1px solid #D1D5DB' }}>
-                            <div className=\"flex justify-between items-start mb-2\">
-                              <div className=\"flex-1\">
+                          <div key={exp.id} className="pb-4 group" style={{ borderBottom: '1px solid #D1D5DB' }}>
+                            <div className="flex justify-between items-start mb-2">
+                              <div className="flex-1">
                                 {isEditable ? (
                                   <>
                                     <input
-                                      type=\"text\"
+                                      type="text"
                                       value={exp.role}
                                       onChange={(e) => {
                                         const value = e.target.value;
@@ -1780,7 +1810,7 @@ export default function App() {
                                         setPersonaData({ ...personaData, experiences: updated });
                                         setHasUnsavedChanges(true);
                                       }}
-                                      className=\"w-full mb-1 rounded border px-2 py-1\"
+                                      className="w-full mb-1 rounded border px-2 py-1"
                                       style={{
                                         fontSize: '14px',
                                         fontWeight: 600,
@@ -1789,7 +1819,7 @@ export default function App() {
                                       }}
                                     />
                                     <input
-                                      type=\"text\"
+                                      type="text"
                                       value={exp.company}
                                       onChange={(e) => {
                                         const value = e.target.value;
@@ -1797,7 +1827,7 @@ export default function App() {
                                         setPersonaData({ ...personaData, experiences: updated });
                                         setHasUnsavedChanges(true);
                                       }}
-                                      className=\"w-full rounded border px-2 py-1\"
+                                      className="w-full rounded border px-2 py-1"
                                       style={{
                                         fontSize: '14px',
                                         color: '#6B7280',
@@ -1812,10 +1842,10 @@ export default function App() {
                                   </>
                                 )}
                               </div>
-                              <div className=\"flex items-center gap-2\">
+                              <div className="flex items-center gap-2">
                                 {isEditable ? (
                                   <input
-                                    type=\"text\"
+                                    type="text"
                                     value={exp.date}
                                     onChange={(e) => {
                                       const value = e.target.value;
@@ -1823,7 +1853,7 @@ export default function App() {
                                       setPersonaData({ ...personaData, experiences: updated });
                                       setHasUnsavedChanges(true);
                                     }}
-                                    className=\"rounded border px-2 py-1 text-right\"
+                                    className="rounded border px-2 py-1 text-right"
                                     style={{
                                       fontSize: '12px',
                                       color: '#6B7280',
@@ -1837,7 +1867,7 @@ export default function App() {
                                 {isEditable && (
                                   <button
                                     onClick={() => removeExperience(exp.id)}
-                                    className=\"opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-gray-100 transition-all\"
+                                    className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-gray-100 transition-all"
                                     style={{ color: '#DC2626' }}
                                   >
                                     <X size={14} />
@@ -1855,7 +1885,7 @@ export default function App() {
                                   setHasUnsavedChanges(true);
                                 }}
                                 rows={2}
-                                className=\"w-full rounded border px-2 py-1\"
+                                className="w-full rounded border px-2 py-1"
                                 style={{
                                   fontSize: '14px',
                                   color: '#6B7280',
@@ -1886,7 +1916,7 @@ export default function App() {
                             });
                             setHasUnsavedChanges(true);
                           }}
-                          className=\"mt-4 flex items-center gap-2 rounded-lg border-2 border-dashed p-3 transition-colors hover:bg-gray-50 w-full justify-center\"
+                          className="mt-4 flex items-center gap-2 rounded-lg border-2 border-dashed p-3 transition-colors hover:bg-gray-50 w-full justify-center"
                           style={{
                             borderColor: '#D1D5DB',
                             color: '#6B7280',
@@ -1903,9 +1933,9 @@ export default function App() {
                     {/* Career Highlights */}
                     <div>
                       <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Career Highlights</h4>
-                      <div className=\"grid grid-cols-1 md:grid-cols-2 gap-3\">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         {(personaData?.careerHighlights ?? []).map((highlight, idx) => (
-                          <div key={idx} className=\"p-3 rounded-lg border flex items-start gap-2\" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
+                          <div key={idx} className="p-3 rounded-lg border flex items-start gap-2" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
                             <Award size={16} style={{ color: '#14B8A6', marginTop: '2px', flexShrink: 0 }} />
                             <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5' }}>{highlight}</p>
                           </div>
@@ -1925,17 +1955,17 @@ export default function App() {
                   animate={{ y: 0, opacity: 1 }}
                   exit={{ y: 100, opacity: 0 }}
                   transition={{ duration: 0.3 }}
-                  className=\"fixed bottom-0 left-0 right-0 bg-white border-t\"
+                  className="fixed bottom-0 left-0 right-0 bg-white border-t"
                   style={{
                     borderColor: '#D1D5DB',
                     padding: '16px 32px',
                     boxShadow: '0px -4px 12px rgba(0, 0, 0, 0.05)',
                   }}
                 >
-                  <div className=\"max-w-7xl mx-auto flex items-center justify-between\">
+                  <div className="max-w-7xl mx-auto flex items-center justify-between">
                     <button
                       onClick={() => setIsEditable(false)}
-                      className=\"rounded-lg transition-colors\"
+                      className="rounded-lg transition-colors"
                       style={{
                         padding: '12px 20px',
                         backgroundColor: 'transparent',
@@ -1949,7 +1979,7 @@ export default function App() {
                     </button>
                     <button
                       onClick={handleFinalize}
-                      className=\"rounded-lg transition-all duration-200\"
+                      className="rounded-lg transition-all duration-200"
                       style={{
                         padding: '12px 20px',
                         backgroundColor: '#14B8A6',
@@ -1976,10 +2006,10 @@ export default function App() {
 
         {/* Finalized State */}
         {state === 'finalized' && (
-          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className=\"max-w-4xl mx-auto\">
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="max-w-4xl mx-auto">
             <button
               onClick={() => setState('draft')}
-              className=\"mb-6 flex items-center gap-2 transition-all duration-200 hover:opacity-80\"
+              className="mb-6 flex items-center gap-2 transition-all duration-200 hover:opacity-80"
               style={{
                 color: '#14B8A6',
                 fontWeight: 500,
@@ -1989,7 +2019,7 @@ export default function App() {
                 cursor: 'pointer',
               }}
             >
-              &#x2190; Go Back
+              ← Go Back
             </button>
             <h2
               onMouseEnter={(e) => {
@@ -2000,7 +2030,7 @@ export default function App() {
                 setIsHoveringHeading(false);
                 e.currentTarget.style.filter = 'none';
               }}
-              className=\"relative inline-block cursor-default mx-auto\"
+              className="relative inline-block cursor-default mx-auto"
               style={{
                 fontSize: '32px',
                 fontWeight: 700,
@@ -2036,7 +2066,7 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.98 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.3, delay: 0.1 }}
-              className=\"bg-white rounded-xl transition-all duration-300\"
+              className="bg-white rounded-xl transition-all duration-300"
               style={{
                 boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.05)',
                 padding: '32px',
@@ -2050,11 +2080,11 @@ export default function App() {
               }}
             >
               {/* Persona Header */}
-              <div className=\"flex items-center gap-4 mb-8 pb-6\" style={{ borderBottom: '1px solid #D1D5DB' }}>
+              <div className="flex items-center gap-4 mb-8 pb-6" style={{ borderBottom: '1px solid #D1D5DB' }}>
                 {personaData?.profileImage ? (
-                  <img src={personaData.profileImage} alt=\"Profile\" className=\"w-20 h-20 rounded-full object-cover flex-shrink-0\" />
+                  <img src={personaData.profileImage} alt="Profile" className="w-20 h-20 rounded-full object-cover flex-shrink-0" />
                 ) : (
-                  <div className=\"w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0\" style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '28px', fontWeight: 600 }}>
+                  <div className="w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0" style={{ backgroundColor: '#14B8A6', color: 'white', fontSize: '28px', fontWeight: 600 }}>
                     {personaCardInitials}
                   </div>
                 )}
@@ -2065,17 +2095,17 @@ export default function App() {
               </div>
 
               {/* Professional Summary */}
-              <div className=\"mb-8\">
+              <div className="mb-8">
                 <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Professional Summary</h4>
                 <p style={{ fontSize: '14px', color: '#6B7280', lineHeight: '1.6' }}>{personaData.summary}</p>
               </div>
 
               {/* Skills */}
-              <div className=\"mb-8\">
+              <div className="mb-8">
                 <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Skills</h4>
-                <div className=\"flex flex-wrap gap-2\">
+                <div className="flex flex-wrap gap-2">
                   {personaData.skills.map((skill, idx) => (
-                    <span key={idx} className=\"rounded-full px-3 py-1.5\" style={{ backgroundColor: '#F3F4F6', color: '#1F2937', fontSize: '12px', fontWeight: 500 }}>
+                    <span key={idx} className="rounded-full px-3 py-1.5" style={{ backgroundColor: '#F3F4F6', color: '#1F2937', fontSize: '12px', fontWeight: 500 }}>
                       {skill}
                     </span>
                   ))}
@@ -2083,12 +2113,12 @@ export default function App() {
               </div>
 
               {/* Key Experiences */}
-              <div className=\"mb-8\">
+              <div className="mb-8">
                 <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Key Experiences</h4>
-                <div className=\"space-y-6\">
+                <div className="space-y-6">
                   {personaData.experiences.map((exp) => (
                     <div key={exp.id}>
-                      <div className=\"flex justify-between items-start mb-2\">
+                      <div className="flex justify-between items-start mb-2">
                         <div>
                           <h5 style={{ fontSize: '14px', fontWeight: 600, color: '#1F2937' }}>{exp.role}</h5>
                           <p style={{ fontSize: '14px', color: '#6B7280' }}>{exp.company}</p>
@@ -2102,11 +2132,11 @@ export default function App() {
               </div>
 
               {/* Career Highlights */}
-              <div className=\"mb-8\">
+              <div className="mb-8">
                 <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Career Highlights</h4>
-                <div className=\"grid grid-cols-1 md:grid-cols-2 gap-3\">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {personaData.careerHighlights.map((highlight, idx) => (
-                    <div key={idx} className=\"p-3 rounded-lg border flex items-start gap-2\" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
+                    <div key={idx} className="p-3 rounded-lg border flex items-start gap-2" style={{ borderColor: '#D1D5DB', backgroundColor: '#FAFAFA' }}>
                       <Award size={16} style={{ color: '#14B8A6', marginTop: '2px', flexShrink: 0 }} />
                       <p style={{ fontSize: '13px', color: '#1F2937', lineHeight: '1.5' }}>{highlight}</p>
                     </div>
@@ -2119,8 +2149,8 @@ export default function App() {
                 <h4 style={{ fontSize: '16px', fontWeight: 600, color: '#1F2937', marginBottom: '12px' }}>Version History</h4>
 
                 {isLoadingVersions ? (
-                  <div className=\"flex items-center gap-2\" style={{ color: '#6B7280', fontSize: '13px' }}>
-                    <Loader2 className=\"animate-spin\" size={14} />
+                  <div className="flex items-center gap-2" style={{ color: '#6B7280', fontSize: '13px' }}>
+                    <Loader2 className="animate-spin" size={14} />
                     Loading versions...
                   </div>
                 ) : versionsError ? (
@@ -2128,9 +2158,9 @@ export default function App() {
                 ) : versions.length === 0 ? (
                   <div style={{ color: '#6B7280', fontSize: '13px' }}>{personaId ? 'No versions found yet.' : 'No saved persona yet (versions available after save).'}</div>
                 ) : (
-                  <div className=\"space-y-2\">
+                  <div className="space-y-2">
                     {versions.slice(0, 10).map((v) => (
-                      <div key={v.id} className=\"flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2\">
+                      <div key={v.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
                         <div style={{ fontSize: '13px', color: '#1F2937', fontWeight: 500 }}>v{v.version}</div>
                         <div style={{ fontSize: '12px', color: '#6B7280' }}>{new Date(v.createdAt).toLocaleString()}</div>
                       </div>
