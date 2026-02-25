@@ -452,7 +452,7 @@ export default function App() {
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    // Prevent bubbling into any parent click handlers (and avoid any chance of recursive click loops).
+    // Prevent bubbling into any parent click handlers (and avoid any chance of recursive click loops/freezes).
     e.stopPropagation();
 
     if (!e.target.files) return;
