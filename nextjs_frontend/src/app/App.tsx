@@ -258,20 +258,51 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
   /**
    * Attempt to map backend persona JSON into this UI's legacy PersonaData fields.
    *
-   * Authoritative mapping rules (per user_input_ref):
-   * - name: personaJson.profile.headline OR personaJson.name OR fallback.name
-   * - title: personaJson.title OR fallback.title
-   * - summary: personaJson.professional_summary OR personaJson.summary OR fallback.summary
-   * - skills: personaJson.core_competencies OR personaJson.skills (string[])
-   * - careerHighlights: personaJson.career_highlights, handling both:
-   *    - string entries
-   *    - object entries shaped like { text: string }
-   *   Fallback to fallback.careerHighlights when missing/empty.
+   * We support TWO common backend shapes:
+   * 1) "Legacy/current state" persona JSON keys:
+   *    - professional_summary (string)
+   *    - core_competencies (string[])
+   *    - career_highlights (string[] | {text:string}[])
+   *
+   * 2) OpenAPI PersonaDraft shape (POST /ai/personas/generate and orchestration generate-draft):
+   *    - title (string)
+   *    - summary (string)
+   *    - profile.headline (string)
+   *    - skills (string[])
+   *    - experienceHighlights (string[])
+   *
+   * UI bindings:
+   * - personaData.name is used as the primary display name in the UI.
+   * - personaData.title is displayed as the role/title line.
+   * - personaData.summary feeds "Professional Summary".
+   * - personaData.skills feeds "Skills".
+   * - personaData.careerHighlights feeds "Career Highlights".
    */
   // eslint-disable-next-line no-console
   console.log('[persona][coerce] raw personaJson:', personaJson);
 
   try {
+    const coercedSkills = asStringArray(personaJson?.core_competencies ?? personaJson?.skills);
+
+    const coerceHighlights = (value: unknown): string[] => {
+      if (!Array.isArray(value)) return [];
+      return (value as any[])
+        .map((h) => {
+          if (typeof h === 'string') return h;
+          if (typeof h === 'object' && h !== null) {
+            // Support { text: string } and a few other defensive variants.
+            const text = (h as any).text ?? (h as any).value ?? (h as any).highlight;
+            return typeof text === 'string' ? text : '';
+          }
+          return '';
+        })
+        .filter((v) => typeof v === 'string' && v.trim().length > 0) as string[];
+    };
+
+    // PersonaDraft uses experienceHighlights; legacy uses career_highlights.
+    const coercedHighlights =
+      coerceHighlights(personaJson?.experienceHighlights) || coerceHighlights(personaJson?.career_highlights);
+
     const next: PersonaData = {
       ...fallback,
 
@@ -279,14 +310,9 @@ function coercePersonaDataFromBackendJson(personaJson: any, fallback: PersonaDat
       name: personaJson?.profile?.headline || personaJson?.name || fallback.name,
       title: personaJson?.title || fallback.title,
       summary: personaJson?.professional_summary ?? personaJson?.summary ?? fallback.summary,
-      skills: asStringArray(personaJson?.core_competencies ?? personaJson?.skills),
+      skills: coercedSkills.length > 0 ? coercedSkills : fallback.skills,
 
-      // Handle array of strings OR array of objects { text: string } for highlights
-      careerHighlights: Array.isArray(personaJson?.career_highlights)
-        ? (personaJson.career_highlights
-            .map((h: any) => (typeof h === 'object' && h !== null ? h.text : h))
-            .filter((v: any) => typeof v === 'string' && v.trim().length > 0) as string[])
-        : fallback.careerHighlights,
+      careerHighlights: coercedHighlights.length > 0 ? coercedHighlights : fallback.careerHighlights,
     };
 
     return next;
