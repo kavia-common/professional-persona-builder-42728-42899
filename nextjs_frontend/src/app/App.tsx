@@ -502,6 +502,9 @@ export default function App() {
       existingPersonaId: personaId,
     });
 
+    // Reset artifact hash cache on a new generation so the next build's artifacts are applied.
+    lastAppliedPersonaArtifactJsonRef.current = {};
+
     // Clear prior error guard on explicit user action.
     setHasError(false);
 
@@ -711,7 +714,7 @@ export default function App() {
         // Keep the processing screen visible so the user sees the backend error banner.
         setState('processing');
       }
-    }, 800);
+    }, 2000);
 
     return () => {
       cancelled = true;
@@ -734,107 +737,31 @@ export default function App() {
 
   // When we enter draft state, attempt to fetch orchestration artifacts and populate UI persona (best-effort).
   useEffect(() => {
-    if (!buildId) return;
-    if (state !== 'draft') return;
-    if (hasError) return;
+    if (!buildId || state !== 'draft' || hasError) return;
+
+    // Use a local flag to prevent multiple overlapping async calls
+    let isFetching = false;
 
     const generationId = generationIdRef.current;
-    let cancelled = false;
 
-    // eslint-disable-next-line no-console
-    console.log(`[artifacts][gen:${generationId}] entering draft; fetching orchestration artifacts`, { buildId });
+    const fetchArtifacts = async () => {
+      if (isFetching) return;
+      isFetching = true;
 
-    (async () => {
       try {
         const { getOrchestrationByBuild } = await import('../lib/apiClient');
-
-        // Requested explicit logging for orchestration artifact fetch.
-        // eslint-disable-next-line no-console
-        console.log(`[getOrchestrationByBuild][gen:${generationId}] request:`, { buildId });
-
         const orch = await getOrchestrationByBuild(buildId);
+        const { personaJson } = extractPersonaJsonFromOrchestrationRecord(orch);
 
-        // eslint-disable-next-line no-console
-        console.log(`[getOrchestrationByBuild][gen:${generationId}] response:`, orch);
-        // eslint-disable-next-line no-console
-        console.log(`[artifacts][gen:${generationId}] getOrchestrationByBuild raw response:`, orch);
-
-        // Key-logging requested in task (helps debug where persona draft actually lives).
-        logAvailableKeys(`[artifacts][gen:${generationId}] orchestration`, orch);
-
-        if (cancelled || !isMountedRef.current) return;
-
-        const extracted = extractPersonaJsonFromOrchestrationRecord(orch);
-        const personaJson = extracted.personaJson;
-
-        // Ensure logs show a non-null sourcePath when ANY candidate exists.
-        // This helps quickly confirm the UI is "seeing" data even if coercion rejects it later.
-        if (personaJson !== null && extracted.sourcePath === null) {
-          // eslint-disable-next-line no-console
-          console.warn(`[artifacts][gen:${generationId}] personaJson exists but sourcePath is null (unexpected)`, {
-            personaJsonType: Array.isArray(personaJson) ? 'array' : typeof personaJson,
-          });
-        }
-
-        // Small preview (avoid dumping huge payloads).
-        const preview =
-          personaJson && typeof personaJson === 'object'
-            ? safeJsonStringify(personaJson).slice(0, 600)
-            : String(personaJson).slice(0, 200);
-
-        // eslint-disable-next-line no-console
-        console.log(`[artifacts][gen:${generationId}] extracted personaJson`, {
-          sourcePath: extracted.sourcePath,
-          personaJsonType: personaJson === null ? 'null' : Array.isArray(personaJson) ? 'array' : typeof personaJson,
-          preview,
-        });
-
-        if (!personaJson) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[artifacts][gen:${generationId}] no personaJson found in orchestration record; UI will keep fallback personaData. sourcePath=`,
-            extracted.sourcePath,
-            'orch keys=',
-            isNonEmptyObject(orch) ? Object.keys(orch) : typeof orch
-          );
-          return;
-        }
-
-        // Guard: ensure we have a plausible object to coerce.
-        if (!isNonEmptyObject(personaJson)) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[artifacts][gen:${generationId}] personaJson found but is empty/non-object; ignoring to prevent flicker/reversion`,
-            { sourcePath: extracted.sourcePath, personaJsonType: typeof personaJson, personaJson }
-          );
-          return;
-        }
-
-        /**
-         * LOOP-KILLER CIRCUIT BREAKER (authoritative behavior from user_input_ref)
-         *
-         * Problem: orchestration fetch may return a new object identity each time (even if same data),
-         * causing repeated setState calls and potential infinite render loops.
-         *
-         * Solution (MANDATORY):
-         * Phase 1: Hash the raw personaJson and compare against last applied per buildId.
-         * Phase 2: Deep compare coerced PersonaData (next vs prev) and only apply if it changes UI state.
-         */
         if (personaJson && isNonEmptyObject(personaJson)) {
           const artifactJson = safeJsonStringify(personaJson);
 
-          // Phase 1: Check the raw response hash
           if (artifactJson !== lastAppliedPersonaArtifactJsonRef.current[buildId]) {
             setPersonaData((prev) => {
               const next = coercePersonaDataFromBackendJson(personaJson, prev);
+              if (JSON.stringify(next) === JSON.stringify(prev)) return prev;
 
-              // Phase 2: Deep compare the coerced data
-              // Only return 'next' if it actually changes the UI state
-              if (JSON.stringify(next) === JSON.stringify(prev)) {
-                return prev;
-              }
-
-              // Update the reference and return the new data
+              // CRITICAL: Update the ref ONLY here
               lastAppliedPersonaArtifactJsonRef.current[buildId] = artifactJson;
               return next;
             });
@@ -844,20 +771,16 @@ export default function App() {
         // best-effort only; ignore, but log for diagnostics
         // eslint-disable-next-line no-console
         console.error(`[artifacts][gen:${generationId}] artifact fetch failed`, err);
-        // eslint-disable-next-line no-console
-        console.error(`[artifacts][gen:${generationId}] artifact fetch failed message:`, getErrorMessage(err));
-        // eslint-disable-next-line no-console
-        console.error(`[artifacts][gen:${generationId}] artifact fetch failed details:`, safeJsonStringify(err));
+      } finally {
+        isFetching = false;
       }
-    })();
-
-    return () => {
-      cancelled = true;
-      // eslint-disable-next-line no-console
-      console.log(`[artifacts][gen:${generationId}] cleanup (cancelled)`, { buildId });
     };
-    // initialPersonaFallback is stable (memo []), buildId/state are primitives.
-  }, [buildId, state, initialPersonaFallback, hasError]);
+
+    fetchArtifacts();
+
+    // ONLY depend on buildId and state.
+    // DO NOT add personaData here or it will loop.
+  }, [buildId, state, hasError]);
 
   // Load versions whenever personaId becomes available.
   useEffect(() => {
