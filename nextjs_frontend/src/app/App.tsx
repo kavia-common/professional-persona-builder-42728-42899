@@ -153,14 +153,25 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
    * - artifacts.draftPersona is often where live backend persona data resides.
    */
   const candidates: Array<Array<string>> = [
-    // TOP PRIORITY (authoritative): live persona draft often stored here
+    /**
+     * TOP PRIORITY (authoritative): backend commonly stores persona payload nested.
+     * Support both "direct object" and wrapped shapes.
+     */
     ['artifacts', 'draftPersona'],
+    ['artifacts', 'draftPersona', 'persona'],
+    ['artifacts', 'draftPersona', 'draft'],
+    ['artifacts', 'draftPersona', 'personaJson'],
+
+    // Final variants (some backends wrap final under { final: {...} })
+    ['artifacts', 'finalPersona'],
+    ['artifacts', 'finalPersona', 'final'],
+    ['artifacts', 'finalPersona', 'persona'],
+    ['artifacts', 'finalPersona', 'personaJson'],
 
     // Other artifact envelopes
     ['artifacts', 'output'],
     ['artifacts', 'result'],
     ['artifacts', 'output', 'personaJson'],
-    ['artifacts', 'finalPersona'],
 
     // Legacy/alternate locations
     ['artifacts', 'personaJson'],
@@ -173,7 +184,7 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
     ['draftPersona'],
     ['draft'],
 
-    // Fallback (authoritative): may contain full persona, but can also be non-persona (personaId-only) in some shapes
+    // Orchestration run-all response "results" (may be the actual persona draft)
     ['results', 'generate', 'persona'],
 
     // Other legacy fallbacks
@@ -183,6 +194,11 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
 
   const looksLikePersona = (value: any): boolean => {
     if (!isNonEmptyObject(value)) return false;
+
+    // Reject common non-persona envelopes early.
+    // E.g. orchestration "results.generate" might be { personaId: ... } in some versions.
+    const keys = Object.keys(value);
+    if (keys.length === 1 && (value as any).personaId) return false;
 
     // Observed “current state persona” format
     if (
@@ -194,17 +210,14 @@ function extractPersonaJsonFromOrchestrationRecord(orch: any): { personaJson: an
       return true;
     }
 
-    // Backend PersonaDraft shape (from OpenAPI)
-    if (
-      typeof (value as any).title === 'string' ||
-      typeof (value as any).summary === 'string' ||
-      Array.isArray((value as any).skills) ||
-      isNonEmptyObject((value as any).profile)
-    ) {
-      return true;
-    }
+    // Backend PersonaDraft shape (from OpenAPI): require at least one meaningful field.
+    const hasTitle = typeof (value as any).title === 'string' && (value as any).title.trim().length > 0;
+    const hasSummary = typeof (value as any).summary === 'string' && (value as any).summary.trim().length > 0;
+    const hasSkills = Array.isArray((value as any).skills) && (value as any).skills.length > 0;
+    const hasProfileHeadline =
+      typeof (value as any)?.profile?.headline === 'string' && (value as any).profile.headline.trim().length > 0;
 
-    return false;
+    return hasTitle || hasSummary || hasSkills || hasProfileHeadline;
   };
 
   let firstNonNull: { personaJson: any; sourcePath: string } | null = null;
@@ -361,7 +374,12 @@ export default function App() {
     (inputRef: React.RefObject<HTMLInputElement>, e?: React.SyntheticEvent) => {
       /**
        * Opens a hidden <input type="file"> in a safe, non-reentrant way.
-       * This is shared across all file pickers (primary upload, add-more, profile image).
+       *
+       * Chrome-specific freeze fix:
+       * - Calling input.click() synchronously inside a React click handler can re-enter via
+       *   focus/click side-effects and produce an event storm (appears like a hang).
+       * - Deferring the actual click to the next tick breaks same-stack recursion while
+       *   preserving the "user gesture" in practice for file dialogs.
        */
       if (e) {
         e.preventDefault();
@@ -372,14 +390,18 @@ export default function App() {
       const nativeEvent = (e as any)?.nativeEvent as Event | undefined;
       if (nativeEvent && 'isTrusted' in nativeEvent && !(nativeEvent as any).isTrusted) return;
 
-      // If we're already processing a click, ignore all subsequent ones for 1 full second
+      // If we're already processing a click, ignore all subsequent ones for 1 full second.
       if (isOpeningFilePickerRef.current) return;
       isOpeningFilePickerRef.current = true;
 
       try {
-        inputRef.current?.click();
+        // Break synchronous focus/click recursion by deferring to the next tick.
+        setTimeout(() => {
+          // Input might be unmounted by the time this runs; guard with optional chaining.
+          inputRef.current?.click();
+        }, 0);
       } finally {
-        // Increase lockout to 1000ms to allow the OS file dialog to "take over"
+        // Allow the OS file dialog to "take over" and avoid rapid re-open storms.
         setTimeout(() => {
           isOpeningFilePickerRef.current = false;
         }, 1000);
