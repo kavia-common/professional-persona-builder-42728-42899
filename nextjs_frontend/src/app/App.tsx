@@ -217,6 +217,25 @@ export default function App() {
     renderDiagRef.current.windowStartMs = nowMs;
   }
 
+  /**
+   * Mount guard: used to prevent setState after unmount and to stabilize any auto-trigger logic.
+   * This also helps prevent runaway render loops caused by async flows updating state after teardown.
+   */
+  const isMountedRef = useRef(false);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  /**
+   * Error guard:
+   * When backend failures happen, we set hasError and stop any further background loops
+   * (e.g. polling) instead of resetting app state back to "initial"/restarting flows.
+   */
+  const [hasError, setHasError] = useState(false);
+
   const [state, setState] = useState<AppState>('initial');
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFileData[]>([]);
   const [uploadError, setUploadError] = useState<string>('');
@@ -302,6 +321,7 @@ export default function App() {
       buildId,
       personaId,
       isPolling,
+      hasError,
       personaNameLen: personaName.length,
       personaTitleLen: personaTitle.length,
       personaSummaryLen: personaSummary.length,
@@ -392,6 +412,9 @@ export default function App() {
       existingPersonaId: personaId,
     });
 
+    // Clear prior error guard on explicit user action.
+    setHasError(false);
+
     setBackendError('');
     setVersionsError('');
     setVersions([]);
@@ -471,6 +494,8 @@ export default function App() {
       console.error(`[draft][gen:${generationId}] generate draft failed`, { message, error: e });
 
       setBackendError(message);
+      setHasError(true);
+
       // Keep user in processing view so they can see the error banner in the left column.
       setState('processing');
     }
@@ -537,10 +562,12 @@ export default function App() {
   useEffect(() => {
     if (!buildId) return;
     if (state !== 'processing') return;
+    if (hasError) return;
 
     const generationId = generationIdRef.current;
     let cancelled = false;
-    setIsPolling(true);
+
+    if (isMountedRef.current) setIsPolling(true);
 
     console.log(`[poll][gen:${generationId}] starting polling`, { buildId, state });
 
@@ -549,7 +576,8 @@ export default function App() {
         const status = await getBuildStatus(buildId);
         console.log(`[poll][gen:${generationId}] getBuildStatus raw response:`, status);
 
-        if (cancelled) return;
+        if (cancelled || !isMountedRef.current) return;
+
         setBuildStatus(status);
 
         if (status.status === 'succeeded') {
@@ -564,13 +592,16 @@ export default function App() {
             status
           );
           setBackendError(status.message || `Build ${status.status}.`);
+          setHasError(true);
+
           // Keep the processing screen visible so the user sees the backend error banner.
           setState('processing');
         } else {
           // queued/running: stay in processing
         }
       } catch (e: any) {
-        if (cancelled) return;
+        if (cancelled || !isMountedRef.current) return;
+
         const payloadMsg =
           e?.payload && typeof e.payload === 'object' && e.payload !== null
             ? e.payload?.message || e.payload?.error
@@ -580,6 +611,8 @@ export default function App() {
         console.error(`[poll][gen:${generationId}] polling error`, { message, error: e });
 
         setBackendError(message);
+        setHasError(true);
+
         // Keep the processing screen visible so the user sees the backend error banner.
         setState('processing');
       }
@@ -587,17 +620,18 @@ export default function App() {
 
     return () => {
       cancelled = true;
-      setIsPolling(false);
+      if (isMountedRef.current) setIsPolling(false);
       clearInterval(interval);
       console.log(`[poll][gen:${generationId}] stopped polling (cleanup)`, { buildId });
     };
     // IMPORTANT: keep dependencies primitive to avoid object-identity loops.
-  }, [buildId, state]);
+  }, [buildId, state, hasError]);
 
   // When we enter draft state, attempt to fetch orchestration artifacts and populate UI persona (best-effort).
   useEffect(() => {
     if (!buildId) return;
     if (state !== 'draft') return;
+    if (hasError) return;
 
     const generationId = generationIdRef.current;
     let cancelled = false;
@@ -617,7 +651,7 @@ export default function App() {
 
         console.log(`[artifacts][gen:${generationId}] getOrchestrationByBuild raw response:`, orch);
 
-        if (cancelled) return;
+        if (cancelled || !isMountedRef.current) return;
 
         const maybeDraft = inferDraftFromOrchestrationRecord(orch);
 
@@ -682,7 +716,7 @@ export default function App() {
       console.log(`[artifacts][gen:${generationId}] cleanup (cancelled)`, { buildId });
     };
     // initialPersonaFallback is stable (memo []), buildId/state are primitives.
-  }, [buildId, state, initialPersonaFallback]);
+  }, [buildId, state, initialPersonaFallback, hasError]);
 
   // Load versions whenever personaId becomes available.
   useEffect(() => {
@@ -748,9 +782,12 @@ export default function App() {
   }, []);
 
   const removeExperience = (id: string) => {
-    setPersonaData({
-      ...personaData,
-      experiences: personaData.experiences.filter((exp) => exp.id !== id),
+    setPersonaData((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        experiences: prev.experiences.filter((exp) => exp.id !== id),
+      };
     });
     setHasUnsavedChanges(true);
   };
