@@ -861,8 +861,8 @@ export default function App() {
         return;
       }
 
-      // Persist the full JSON object only when it is object-shaped.
-      // This avoids sending null/invalid payloads that can trigger backend validation errors.
+      // Persist the full persona as personaJson so edits anywhere (role/name/summary/skills/etc.)
+      // are stored in the backend version history.
       const personaJsonToSave = isNonEmptyObject(personaData) ? (personaData as any) : undefined;
 
       await updatePersona({
@@ -871,8 +871,9 @@ export default function App() {
         personaJson: personaJsonToSave,
       });
 
+      // Success: clear dirty state and exit edit mode.
       setHasUnsavedChanges(false);
-      setIsEditable(false); // return to normal viewing mode after save
+      setIsEditable(false);
       setShowSaveSuccess(true);
       setTimeout(() => setShowSaveSuccess(false), 3000);
     } catch (e: any) {
