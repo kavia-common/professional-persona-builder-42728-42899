@@ -1715,11 +1715,7 @@ export default function App() {
                             {(fileData as any).displayName || fileData.file.name}
                           </span>
                         </div>
-                        {state === 'draft' && (
-                          <button onClick={() => removeFile(fileData.id)} className="p-1 rounded hover:bg-gray-200 transition-colors" style={{ color: '#6B7280' }}>
-                            <X size={16} />
-                          </button>
-                        )}
+                        {/* UI requirement: do not allow per-document remove in draft persona uploaded documents section */}
                       </div>
                     ))}
                   </div>
@@ -1778,39 +1774,9 @@ export default function App() {
 
                   {state === 'draft' && (
                     <>
-                      <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '16px' }}>Draft persona generated successfully.</p>
+                      <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '0' }}>Draft persona generated successfully.</p>
 
-                      {uploadedFiles.length < MAX_FILES && (
-                        <>
-                          <input
-                            ref={additionalFileInputRef}
-                            type="file"
-                            multiple
-                            accept=".pdf,.docx,.txt"
-                            onChange={handleFileChange}
-                            style={{
-                              display: 'none',
-                              position: 'fixed',
-                              top: '-1000px',
-                              left: '-1000px',
-                            }}
-                            tabIndex={-1}
-                          />
-                          <button
-                            onClick={(e) => openHiddenFileInput(additionalFileInputRef, e)}
-                            className="w-full flex items-center justify-center gap-2 rounded-lg border-2 border-dashed p-3 transition-colors hover:bg-gray-50"
-                            style={{
-                              borderColor: '#D1D5DB',
-                              color: '#6B7280',
-                              fontSize: '14px',
-                              fontWeight: 500,
-                            }}
-                          >
-                            <Plus size={16} />
-                            Add More Documents ({uploadedFiles.length}/{MAX_FILES})
-                          </button>
-                        </>
-                      )}
+                      {/* UI requirement: remove/hide the "Add More Documents (x/5)" control in draft view */}
                     </>
                   )}
                 </div>
