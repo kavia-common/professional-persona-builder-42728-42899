@@ -861,11 +861,14 @@ export default function App() {
         return;
       }
 
+      // Persist the full JSON object only when it is object-shaped.
+      // This avoids sending null/invalid payloads that can trigger backend validation errors.
+      const personaJsonToSave = isNonEmptyObject(personaData) ? (personaData as any) : undefined;
+
       await updatePersona({
         personaId,
         title: personaData.title,
-        // Persist the full JSON object; apiClient will validate/omit if it isn't object-shaped.
-        personaJson: personaData as any,
+        personaJson: personaJsonToSave,
       });
 
       setHasUnsavedChanges(false);
