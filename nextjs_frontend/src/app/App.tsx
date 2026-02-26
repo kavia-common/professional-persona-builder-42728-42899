@@ -861,15 +861,19 @@ export default function App() {
         return;
       }
 
+      // Persist the full persona as personaJson so edits anywhere (role/name/summary/skills/etc.)
+      // are stored in the backend version history.
+      const personaJsonToSave = isNonEmptyObject(personaData) ? (personaData as any) : undefined;
+
       await updatePersona({
         personaId,
         title: personaData.title,
-        // Persist the full JSON object; apiClient will validate/omit if it isn't object-shaped.
-        personaJson: personaData as any,
+        personaJson: personaJsonToSave,
       });
 
+      // Success: clear dirty state and exit edit mode.
       setHasUnsavedChanges(false);
-      setIsEditable(false); // return to normal viewing mode after save
+      setIsEditable(false);
       setShowSaveSuccess(true);
       setTimeout(() => setShowSaveSuccess(false), 3000);
     } catch (e: any) {
