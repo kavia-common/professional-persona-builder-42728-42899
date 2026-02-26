@@ -564,20 +564,80 @@ export default function App() {
     setUploadedFiles((prev) => [...prev, ...newUploadedFiles]);
   };
 
+  /**
+   * Chrome crash/freeze mitigation:
+   * - Keep the native file input `onChange` handler as lightweight as possible.
+   * - Guard against duplicate/re-entrant change events (observed on some Chrome+OS combos).
+   * - Defer any non-trivial processing (validation + setState) to the next tick.
+   *
+   * The goal is to avoid doing “work” while the browser is still finalizing the file dialog close,
+   * which can lead to heavy main-thread pressure (and in extreme cases, tab instability).
+   */
+  const isProcessingFileSelectionRef = useRef(false);
+  const pendingFileSelectionTimerRef = useRef<number | null>(null);
+
+  // Conservative safety cap to avoid pathological selections overwhelming the tab.
+  // (This is separate from backend limits; it’s purely a frontend stability guard.)
+  const MAX_TOTAL_UPLOAD_BYTES = 30 * 1024 * 1024; // 30MB across all currently selected + newly selected files
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     e.stopPropagation();
 
+    // Always mark the file dialog inactive as early as possible.
     if (fileDialogActiveRef.current) {
       fileDialogActiveRef.current = false;
       fileDialogCooldownUntilRef.current = Date.now() + FILE_DIALOG_COOLDOWN_MS;
       setIsFileDialogActive(false);
     }
 
-    if (!e.target.files) return;
+    // Some browsers can fire a change event with a null/empty file list (e.g., cancel).
+    if (!e.target.files || e.target.files.length === 0) {
+      // Ensure the input can trigger future selections of the same file.
+      e.target.value = '';
+      return;
+    }
 
-    const newFiles = Array.from(e.target.files);
+    // Snapshot the FileList immediately, then release the input.
+    // (Do not do any heavy work before clearing the input.)
+    const fileList = e.target.files;
     e.target.value = '';
-    addFiles(newFiles);
+
+    // Debounce/merge bursts of change events.
+    if (pendingFileSelectionTimerRef.current) {
+      window.clearTimeout(pendingFileSelectionTimerRef.current);
+      pendingFileSelectionTimerRef.current = null;
+    }
+
+    // Single-flight guard: if we are already processing a selection, drop subsequent bursts.
+    // This avoids duplicate work and potential state churn.
+    if (isProcessingFileSelectionRef.current) {
+      return;
+    }
+
+    isProcessingFileSelectionRef.current = true;
+
+    pendingFileSelectionTimerRef.current = window.setTimeout(() => {
+      try {
+        const newFiles = Array.from(fileList);
+
+        // Total-size guard (existing + new).
+        const existingBytes = uploadedFiles.reduce((sum, f) => sum + (f.file?.size ?? 0), 0);
+        const newBytes = newFiles.reduce((sum, f) => sum + (f.size ?? 0), 0);
+        if (existingBytes + newBytes > MAX_TOTAL_UPLOAD_BYTES) {
+          setUploadError(
+            `Selected files are too large for in-browser processing. Please keep total upload size under ${Math.round(
+              MAX_TOTAL_UPLOAD_BYTES / (1024 * 1024)
+            )}MB.`
+          );
+          return;
+        }
+
+        addFiles(newFiles);
+      } finally {
+        isProcessingFileSelectionRef.current = false;
+        pendingFileSelectionTimerRef.current = null;
+      }
+    }, 0);
   };
 
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
