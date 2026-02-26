@@ -567,20 +567,29 @@ export default function App() {
   /**
    * Chrome crash/freeze mitigation:
    * - Keep the native file input `onChange` handler as lightweight as possible.
-   * - Guard against duplicate/re-entrant change events (observed on some Chrome+OS combos).
-   * - Defer any non-trivial processing (validation + setState) to the next tick.
+   * - Defer UI-heavy processing (validation + setState) to the next tick.
    *
-   * The goal is to avoid doing “work” while the browser is still finalizing the file dialog close,
-   * which can lead to heavy main-thread pressure (and in extreme cases, tab instability).
+   * Reliability hardening:
+   * - ALWAYS materialize a real `File[]` synchronously inside the onChange handler.
+   * - Kick off the upload immediately using that snapshot, so we never depend on any
+   *   potentially-invalidated FileList or delayed timers.
    */
-  const isProcessingFileSelectionRef = useRef(false);
-  const pendingFileSelectionTimerRef = useRef<number | null>(null);
 
   // Conservative safety cap to avoid pathological selections overwhelming the tab.
   // (This is separate from backend limits; it’s purely a frontend stability guard.)
   const MAX_TOTAL_UPLOAD_BYTES = 30 * 1024 * 1024; // 30MB across all currently selected + newly selected files
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    /**
+     * IMPORTANT:
+     * - Snapshot FileList BEFORE clearing input value.
+     *   Clearing e.target.value can clear e.target.files in some browsers, which caused:
+     *   "Select Files" -> choose files -> no upload request.
+     *
+     * Reliability rule:
+     * - Only trigger the backend upload when the selection passes the same basic UI guards
+     *   (type/count/size). This keeps behavior predictable.
+     */
     e.stopPropagation();
 
     // Always mark the file dialog inactive as early as possible.
@@ -590,53 +599,117 @@ export default function App() {
       setIsFileDialogActive(false);
     }
 
+    const list = e.target.files;
+
     // Some browsers can fire a change event with a null/empty file list (e.g., cancel).
-    if (!e.target.files || e.target.files.length === 0) {
-      // Ensure the input can trigger future selections of the same file.
-      e.target.value = '';
+    if (!list || list.length === 0) {
+      // eslint-disable-next-line no-console
+      console.log('[upload][picker] onChange fired with no files (cancel?)');
       return;
     }
 
-    // Snapshot the FileList immediately, then release the input.
-    // (Do not do any heavy work before clearing the input.)
-    const fileList = e.target.files;
+    // CRITICAL: snapshot as a real array NOW (do not retain FileList reference).
+    const newFiles = Array.from(list);
+
+    // Ensure the input can trigger future selections of the same file.
+    // NOTE: do this AFTER snapshotting.
     e.target.value = '';
 
-    // Debounce/merge bursts of change events.
-    if (pendingFileSelectionTimerRef.current) {
-      window.clearTimeout(pendingFileSelectionTimerRef.current);
-      pendingFileSelectionTimerRef.current = null;
-    }
+    // eslint-disable-next-line no-console
+    console.log('[upload][picker] onChange snapshot', {
+      count: newFiles.length,
+      names: newFiles.map((f) => f.name),
+      sizes: newFiles.map((f) => f.size),
+      types: newFiles.map((f) => f.type),
+    });
 
-    // Single-flight guard: if we are already processing a selection, drop subsequent bursts.
-    // This avoids duplicate work and potential state churn.
-    if (isProcessingFileSelectionRef.current) {
+    // Validate up-front so we don't POST requests that are guaranteed to be rejected by the UI anyway.
+    const invalidFiles = newFiles.filter((file) => !validateFile(file));
+    if (invalidFiles.length > 0) {
+      setUploadError('Unsupported file format. Please upload PDF, DOCX, or TXT.');
       return;
     }
 
-    isProcessingFileSelectionRef.current = true;
+    // Size guard (existing + new). Use current state via functional update below, but we can still
+    // check new-only bytes here for clearer logs.
+    const newBytes = newFiles.reduce((sum, f) => sum + (f.size ?? 0), 0);
 
-    pendingFileSelectionTimerRef.current = window.setTimeout(() => {
-      try {
-        const newFiles = Array.from(fileList);
+    // Defer UI state updates to next tick to reduce chance of freezes.
+    window.setTimeout(() => {
+      setUploadedFiles((prev) => {
+        const existingBytes = prev.reduce((sum, f) => sum + (f.file?.size ?? 0), 0);
 
-        // Total-size guard (existing + new).
-        const existingBytes = uploadedFiles.reduce((sum, f) => sum + (f.file?.size ?? 0), 0);
-        const newBytes = newFiles.reduce((sum, f) => sum + (f.size ?? 0), 0);
         if (existingBytes + newBytes > MAX_TOTAL_UPLOAD_BYTES) {
           setUploadError(
             `Selected files are too large for in-browser processing. Please keep total upload size under ${Math.round(
               MAX_TOTAL_UPLOAD_BYTES / (1024 * 1024)
             )}MB.`
           );
-          return;
+          return prev;
         }
 
-        addFiles(newFiles);
-      } finally {
-        isProcessingFileSelectionRef.current = false;
-        pendingFileSelectionTimerRef.current = null;
-      }
+        if (prev.length + newFiles.length > MAX_FILES) {
+          setUploadError(`Maximum ${MAX_FILES} documents allowed.`);
+          return prev;
+        }
+
+        setUploadError('');
+        setBackendError('');
+
+        const newUploadedFiles = newFiles.map((file) => ({
+          id: Math.random().toString(36).substr(2, 9),
+          file,
+        }));
+
+        return [...prev, ...newUploadedFiles];
+      });
+
+      // Kick off upload AFTER state guards are satisfied.
+      void (async () => {
+        try {
+          // eslint-disable-next-line no-console
+          console.log('[upload][picker] POST /uploads/documents starting', {
+            count: newFiles.length,
+            names: newFiles.map((f) => f.name),
+          });
+
+          const { uploadDocuments } = await import('../lib/apiClient');
+          const resp = await uploadDocuments({ files: newFiles });
+
+          // eslint-disable-next-line no-console
+          console.log('[upload][picker] POST /uploads/documents succeeded', resp);
+
+          // If backend extracted an employee name for a performance review, prefer that as display label.
+          // We do NOT replace the underlying File.name; we only mirror it into UI state for display.
+          const summaries = Array.isArray((resp as any)?.fileSummaries) ? ((resp as any).fileSummaries as any[]) : [];
+          if (summaries.length > 0) {
+            setUploadedFiles((prev) => {
+              // Apply the summaries to the last N appended files (best-effort).
+              const next = prev.slice();
+              const tailStart = Math.max(0, next.length - newFiles.length);
+
+              for (let i = 0; i < newFiles.length; i += 1) {
+                const summary = summaries[i];
+                const extractedEmployeeName =
+                  summary && typeof summary.extractedEmployeeName === 'string' ? summary.extractedEmployeeName.trim() : '';
+
+                const isPerformanceReview = summary?.category === 'performance_review';
+
+                if (isPerformanceReview && extractedEmployeeName) {
+                  // Attach a non-breaking custom field for display.
+                  (next[tailStart + i] as any).displayName = `Performance review — ${extractedEmployeeName}`;
+                }
+              }
+
+              return next;
+            });
+          }
+        } catch (err: any) {
+          // eslint-disable-next-line no-console
+          console.warn('[upload][picker] POST /uploads/documents failed', err);
+          setBackendError(err?.message || 'Upload failed. Please try again.');
+        }
+      })();
     }, 0);
   };
 
@@ -692,16 +765,36 @@ export default function App() {
         types: files.map((f) => f.type),
       });
 
-      // We still need to upload to establish latest docs on the backend; orchestration can then pick them up.
+      // Upload first (side effects: persists document rows + extracted text rows best-effort).
       await import('../lib/apiClient').then(async ({ uploadDocuments }) => {
         const uploadResp = await uploadDocuments({ files });
         // eslint-disable-next-line no-console
         console.log(`[draft][gen:${generationId}] uploadDocuments raw response:`, uploadResp);
       });
 
+      // CRITICAL: Do NOT rely on backend “useLatestCategoryDocs” auto-selection for anonymous sessions,
+      // because userId is typically null in this UI and the backend may pick up older anonymous docs
+      // (e.g., an archived/stale persona source like “Rossini”).
+      //
+      // Instead, explicitly fetch the newest documents and pass their ids to orchestration.
+      const { listDocuments } = await import('../lib/apiClient');
+      const docs = await listDocuments({ limit: 50, offset: 0 });
+      const newestDocIds = docs
+        .slice()
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .slice(0, files.length) // pick as many as we just uploaded
+        .map((d) => d.id);
+
+      if (newestDocIds.length === 0) {
+        throw new Error('Upload succeeded but no documents are available for orchestration. Please retry.');
+      }
+
       const runAllRequest = {
         mode: 'persona_build' as const,
-        useLatestCategoryDocs: true,
+        // We provide explicit documentIds to ensure newly uploaded docs drive extraction + generation.
+        documentIds: newestDocIds,
+        // Disable the anonymous “latest category docs” path; we want explicit selection.
+        useLatestCategoryDocs: false,
         autoCreatePersona: true,
         generate: {
           saveDraft: true,
@@ -757,6 +850,7 @@ export default function App() {
 
       if (!personaId) {
         setHasUnsavedChanges(false);
+        setIsEditable(false); // return to normal viewing mode after save
         setShowSaveSuccess(true);
         setTimeout(() => setShowSaveSuccess(false), 3000);
         return;
@@ -770,10 +864,12 @@ export default function App() {
       await updatePersona({
         personaId,
         title: personaData.title,
+        // Persist the full JSON object; apiClient will validate/omit if it isn't object-shaped.
         personaJson: personaData as any,
       });
 
       setHasUnsavedChanges(false);
+      setIsEditable(false); // return to normal viewing mode after save
       setShowSaveSuccess(true);
       setTimeout(() => setShowSaveSuccess(false), 3000);
     } catch (e: any) {
@@ -1476,7 +1572,9 @@ export default function App() {
                         <span className="px-2 py-1 rounded text-xs font-medium" style={{ backgroundColor: 'rgba(20, 184, 166, 0.1)', color: '#14B8A6' }}>
                           {getFileType(fileData.file.name)}
                         </span>
-                        <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>{fileData.file.name}</span>
+                        <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>
+                          {(fileData as any).displayName || fileData.file.name}
+                        </span>
                       </div>
                       <button
                         onClick={(e) => {
@@ -1613,13 +1711,11 @@ export default function App() {
                           <span className="px-2 py-1 rounded text-xs font-medium" style={{ backgroundColor: 'rgba(20, 184, 166, 0.1)', color: '#14B8A6' }}>
                             {getFileType(fileData.file.name)}
                           </span>
-                          <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>{fileData.file.name}</span>
+                          <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>
+                            {(fileData as any).displayName || fileData.file.name}
+                          </span>
                         </div>
-                        {state === 'draft' && (
-                          <button onClick={() => removeFile(fileData.id)} className="p-1 rounded hover:bg-gray-200 transition-colors" style={{ color: '#6B7280' }}>
-                            <X size={16} />
-                          </button>
-                        )}
+                        {/* UI requirement: do not allow per-document remove in draft persona uploaded documents section */}
                       </div>
                     ))}
                   </div>
@@ -1678,39 +1774,9 @@ export default function App() {
 
                   {state === 'draft' && (
                     <>
-                      <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '16px' }}>Draft persona generated successfully.</p>
+                      <p style={{ fontSize: '14px', color: '#6B7280', marginBottom: '0' }}>Draft persona generated successfully.</p>
 
-                      {uploadedFiles.length < MAX_FILES && (
-                        <>
-                          <input
-                            ref={additionalFileInputRef}
-                            type="file"
-                            multiple
-                            accept=".pdf,.docx,.txt"
-                            onChange={handleFileChange}
-                            style={{
-                              display: 'none',
-                              position: 'fixed',
-                              top: '-1000px',
-                              left: '-1000px',
-                            }}
-                            tabIndex={-1}
-                          />
-                          <button
-                            onClick={(e) => openHiddenFileInput(additionalFileInputRef, e)}
-                            className="w-full flex items-center justify-center gap-2 rounded-lg border-2 border-dashed p-3 transition-colors hover:bg-gray-50"
-                            style={{
-                              borderColor: '#D1D5DB',
-                              color: '#6B7280',
-                              fontSize: '14px',
-                              fontWeight: 500,
-                            }}
-                          >
-                            <Plus size={16} />
-                            Add More Documents ({uploadedFiles.length}/{MAX_FILES})
-                          </button>
-                        </>
-                      )}
+                      {/* UI requirement: remove/hide the "Add More Documents (x/5)" control in draft view */}
                     </>
                   )}
                 </div>
@@ -1835,21 +1901,23 @@ export default function App() {
                           )}
                         </AnimatePresence>
 
-                        <button
-                          onClick={() => setIsEditable(!isEditable)}
-                          className="flex items-center gap-2 rounded-lg transition-colors"
-                          style={{
-                            padding: '8px 14px',
-                            backgroundColor: isEditable ? 'rgba(20, 184, 166, 0.1)' : 'transparent',
-                            color: '#14B8A6',
-                            border: '1px solid #14B8A6',
-                            fontSize: '14px',
-                            fontWeight: 500,
-                          }}
-                        >
-                          <Edit3 size={16} />
-                          {isEditable ? 'View Mode' : 'Editable View'}
-                        </button>
+                        {!isEditable ? (
+                          <button
+                            onClick={() => setIsEditable(true)}
+                            className="flex items-center gap-2 rounded-lg transition-colors"
+                            style={{
+                              padding: '8px 14px',
+                              backgroundColor: 'transparent',
+                              color: '#14B8A6',
+                              border: '1px solid #14B8A6',
+                              fontSize: '14px',
+                              fontWeight: 500,
+                            }}
+                          >
+                            <Edit3 size={16} />
+                            Edit persona
+                          </button>
+                        ) : null}
                       </div>
                     </div>
 

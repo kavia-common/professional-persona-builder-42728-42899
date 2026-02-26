@@ -17,7 +17,21 @@ const nextConfig = {
    * Note: the frontend API client should still prefer NEXT_PUBLIC_API_BASE for clarity.
    */
   async rewrites() {
+    /**
+     * IMPORTANT:
+     * - The browser-facing base URL can remain same-origin (""), relying on rewrites for API calls.
+     * - However, the rewrite destination is evaluated on the Next.js *server*, where "localhost:3001"
+     *   may NOT point to the Express container in many dev environments (including Kavia).
+     *
+     * To make uploads work reliably in dev, prefer a server-only env var for the backend origin:
+     *   BACKEND_INTERNAL_URL
+     *
+     * Fallbacks:
+     * - NEXT_PUBLIC_API_BASE / NEXT_PUBLIC_BACKEND_URL (when explicitly configured)
+     * - http://localhost:3001 (classic local dev)
+     */
     const backend =
+      process.env.BACKEND_INTERNAL_URL ||
       process.env.NEXT_PUBLIC_API_BASE ||
       process.env.NEXT_PUBLIC_BACKEND_URL ||
       'http://localhost:3001';
