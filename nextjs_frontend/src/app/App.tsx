@@ -580,6 +580,16 @@ export default function App() {
   const MAX_TOTAL_UPLOAD_BYTES = 30 * 1024 * 1024; // 30MB across all currently selected + newly selected files
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    /**
+     * IMPORTANT:
+     * - Snapshot FileList BEFORE clearing input value.
+     *   Clearing e.target.value can clear e.target.files in some browsers, which caused:
+     *   "Select Files" -> choose files -> no upload request.
+     *
+     * Reliability rule:
+     * - Only trigger the backend upload when the selection passes the same basic UI guards
+     *   (type/count/size). This keeps behavior predictable.
+     */
     e.stopPropagation();
 
     // Always mark the file dialog inactive as early as possible.
@@ -591,47 +601,44 @@ export default function App() {
 
     const list = e.target.files;
 
-    // Ensure the input can trigger future selections of the same file.
-    // (Also breaks any accidental dependence on the live FileList.)
-    e.target.value = '';
-
     // Some browsers can fire a change event with a null/empty file list (e.g., cancel).
-    if (!list || list.length === 0) return;
+    if (!list || list.length === 0) {
+      // eslint-disable-next-line no-console
+      console.log('[upload][picker] onChange fired with no files (cancel?)');
+      return;
+    }
 
     // CRITICAL: snapshot as a real array NOW (do not retain FileList reference).
     const newFiles = Array.from(list);
 
-    // 1) Start upload immediately (best-effort) so file selection always triggers upload.
-    void (async () => {
-      try {
-        // eslint-disable-next-line no-console
-        console.log('[upload][picker] uploading selected files', {
-          count: newFiles.length,
-          names: newFiles.map((f) => f.name),
-          sizes: newFiles.map((f) => f.size),
-          types: newFiles.map((f) => f.type),
-        });
+    // Ensure the input can trigger future selections of the same file.
+    // NOTE: do this AFTER snapshotting.
+    e.target.value = '';
 
-        const { uploadDocuments } = await import('../lib/apiClient');
-        const resp = await uploadDocuments({ files: newFiles });
+    // eslint-disable-next-line no-console
+    console.log('[upload][picker] onChange snapshot', {
+      count: newFiles.length,
+      names: newFiles.map((f) => f.name),
+      sizes: newFiles.map((f) => f.size),
+      types: newFiles.map((f) => f.type),
+    });
 
-        // eslint-disable-next-line no-console
-        console.log('[upload][picker] uploadDocuments response', resp);
-      } catch (err: any) {
-        // eslint-disable-next-line no-console
-        console.warn('[upload][picker] upload failed', err);
-        setBackendError(err?.message || 'Upload failed. Please try again.');
-      }
-    })();
+    // Validate up-front so we don't POST requests that are guaranteed to be rejected by the UI anyway.
+    const invalidFiles = newFiles.filter((file) => !validateFile(file));
+    if (invalidFiles.length > 0) {
+      setUploadError('Unsupported file format. Please upload PDF, DOCX, or TXT.');
+      return;
+    }
 
-    // 2) Defer UI state updates + validation to next tick to reduce chance of freezes.
+    // Size guard (existing + new). Use current state via functional update below, but we can still
+    // check new-only bytes here for clearer logs.
+    const newBytes = newFiles.reduce((sum, f) => sum + (f.size ?? 0), 0);
+
+    // Defer UI state updates to next tick to reduce chance of freezes.
     window.setTimeout(() => {
-      // Total-size guard (existing + new).
-      // NOTE: use a functional update to avoid stale closure issues with `uploadedFiles`.
-      const newBytes = newFiles.reduce((sum, f) => sum + (f.size ?? 0), 0);
-
       setUploadedFiles((prev) => {
         const existingBytes = prev.reduce((sum, f) => sum + (f.file?.size ?? 0), 0);
+
         if (existingBytes + newBytes > MAX_TOTAL_UPLOAD_BYTES) {
           setUploadError(
             `Selected files are too large for in-browser processing. Please keep total upload size under ${Math.round(
@@ -641,21 +648,13 @@ export default function App() {
           return prev;
         }
 
-        // Preserve the exact same behavior/validation logic as addFiles(), but avoid
-        // relying on any potentially-stale outer `uploadedFiles`.
-        setUploadError('');
-        setBackendError('');
-
-        const invalidFiles = newFiles.filter((file) => !validateFile(file));
-        if (invalidFiles.length > 0) {
-          setUploadError('Unsupported file format. Please upload PDF, DOCX, or TXT.');
-          return prev;
-        }
-
         if (prev.length + newFiles.length > MAX_FILES) {
           setUploadError(`Maximum ${MAX_FILES} documents allowed.`);
           return prev;
         }
+
+        setUploadError('');
+        setBackendError('');
 
         const newUploadedFiles = newFiles.map((file) => ({
           id: Math.random().toString(36).substr(2, 9),
@@ -664,6 +663,53 @@ export default function App() {
 
         return [...prev, ...newUploadedFiles];
       });
+
+      // Kick off upload AFTER state guards are satisfied.
+      void (async () => {
+        try {
+          // eslint-disable-next-line no-console
+          console.log('[upload][picker] POST /uploads/documents starting', {
+            count: newFiles.length,
+            names: newFiles.map((f) => f.name),
+          });
+
+          const { uploadDocuments } = await import('../lib/apiClient');
+          const resp = await uploadDocuments({ files: newFiles });
+
+          // eslint-disable-next-line no-console
+          console.log('[upload][picker] POST /uploads/documents succeeded', resp);
+
+          // If backend extracted an employee name for a performance review, prefer that as display label.
+          // We do NOT replace the underlying File.name; we only mirror it into UI state for display.
+          const summaries = Array.isArray((resp as any)?.fileSummaries) ? ((resp as any).fileSummaries as any[]) : [];
+          if (summaries.length > 0) {
+            setUploadedFiles((prev) => {
+              // Apply the summaries to the last N appended files (best-effort).
+              const next = prev.slice();
+              const tailStart = Math.max(0, next.length - newFiles.length);
+
+              for (let i = 0; i < newFiles.length; i += 1) {
+                const summary = summaries[i];
+                const extractedEmployeeName =
+                  summary && typeof summary.extractedEmployeeName === 'string' ? summary.extractedEmployeeName.trim() : '';
+
+                const isPerformanceReview = summary?.category === 'performance_review';
+
+                if (isPerformanceReview && extractedEmployeeName) {
+                  // Attach a non-breaking custom field for display.
+                  (next[tailStart + i] as any).displayName = `Performance review — ${extractedEmployeeName}`;
+                }
+              }
+
+              return next;
+            });
+          }
+        } catch (err: any) {
+          // eslint-disable-next-line no-console
+          console.warn('[upload][picker] POST /uploads/documents failed', err);
+          setBackendError(err?.message || 'Upload failed. Please try again.');
+        }
+      })();
     }, 0);
   };
 
@@ -1526,7 +1572,9 @@ export default function App() {
                         <span className="px-2 py-1 rounded text-xs font-medium" style={{ backgroundColor: 'rgba(20, 184, 166, 0.1)', color: '#14B8A6' }}>
                           {getFileType(fileData.file.name)}
                         </span>
-                        <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>{fileData.file.name}</span>
+                        <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>
+                          {(fileData as any).displayName || fileData.file.name}
+                        </span>
                       </div>
                       <button
                         onClick={(e) => {
@@ -1663,7 +1711,9 @@ export default function App() {
                           <span className="px-2 py-1 rounded text-xs font-medium" style={{ backgroundColor: 'rgba(20, 184, 166, 0.1)', color: '#14B8A6' }}>
                             {getFileType(fileData.file.name)}
                           </span>
-                          <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>{fileData.file.name}</span>
+                          <span style={{ fontSize: '14px', color: '#1F2937', fontWeight: 500 }}>
+                            {(fileData as any).displayName || fileData.file.name}
+                          </span>
                         </div>
                         {state === 'draft' && (
                           <button onClick={() => removeFile(fileData.id)} className="p-1 rounded hover:bg-gray-200 transition-colors" style={{ color: '#6B7280' }}>
