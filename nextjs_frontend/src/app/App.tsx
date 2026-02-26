@@ -623,15 +623,27 @@ export default function App() {
       addFiles(newFiles);
 
       // Make “Select Files” behave like a real upload action (same user expectation as drag/drop):
-      // immediately upload the selected files in the background (best-effort).
+      // immediately upload the selected files in the background.
       void (async () => {
         try {
-          const { uploadDocuments } = await import('../lib/apiClient');
-          await uploadDocuments({ files: newFiles });
-        } catch (err) {
-          // Best-effort only; keep UX non-blocking.
           // eslint-disable-next-line no-console
-          console.warn('[upload][picker] background upload failed (best-effort)', err);
+          console.log('[upload][picker] uploading selected files', {
+            count: newFiles.length,
+            names: newFiles.map((f) => f.name),
+            sizes: newFiles.map((f) => f.size),
+            types: newFiles.map((f) => f.type),
+          });
+
+          const { uploadDocuments } = await import('../lib/apiClient');
+          const resp = await uploadDocuments({ files: newFiles });
+
+          // eslint-disable-next-line no-console
+          console.log('[upload][picker] uploadDocuments response', resp);
+        } catch (err: any) {
+          // Surface this since the user report says “no logs / no upload”.
+          // eslint-disable-next-line no-console
+          console.warn('[upload][picker] upload failed', err);
+          setBackendError(err?.message || 'Upload failed. Please try again.');
         }
       })();
 
@@ -776,6 +788,7 @@ export default function App() {
 
       if (!personaId) {
         setHasUnsavedChanges(false);
+        setIsEditable(false); // return to normal viewing mode after save
         setShowSaveSuccess(true);
         setTimeout(() => setShowSaveSuccess(false), 3000);
         return;
@@ -789,10 +802,12 @@ export default function App() {
       await updatePersona({
         personaId,
         title: personaData.title,
+        // Persist the full JSON object; apiClient will validate/omit if it isn't object-shaped.
         personaJson: personaData as any,
       });
 
       setHasUnsavedChanges(false);
+      setIsEditable(false); // return to normal viewing mode after save
       setShowSaveSuccess(true);
       setTimeout(() => setShowSaveSuccess(false), 3000);
     } catch (e: any) {
@@ -1854,21 +1869,23 @@ export default function App() {
                           )}
                         </AnimatePresence>
 
-                        <button
-                          onClick={() => setIsEditable(!isEditable)}
-                          className="flex items-center gap-2 rounded-lg transition-colors"
-                          style={{
-                            padding: '8px 14px',
-                            backgroundColor: isEditable ? 'rgba(20, 184, 166, 0.1)' : 'transparent',
-                            color: '#14B8A6',
-                            border: '1px solid #14B8A6',
-                            fontSize: '14px',
-                            fontWeight: 500,
-                          }}
-                        >
-                          <Edit3 size={16} />
-                          {isEditable ? 'View Mode' : 'Editable View'}
-                        </button>
+                        {!isEditable ? (
+                          <button
+                            onClick={() => setIsEditable(true)}
+                            className="flex items-center gap-2 rounded-lg transition-colors"
+                            style={{
+                              padding: '8px 14px',
+                              backgroundColor: 'transparent',
+                              color: '#14B8A6',
+                              border: '1px solid #14B8A6',
+                              fontSize: '14px',
+                              fontWeight: 500,
+                            }}
+                          >
+                            <Edit3 size={16} />
+                            Edit persona
+                          </button>
+                        ) : null}
                       </div>
                     </div>
 
