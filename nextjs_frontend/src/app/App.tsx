@@ -567,14 +567,13 @@ export default function App() {
   /**
    * Chrome crash/freeze mitigation:
    * - Keep the native file input `onChange` handler as lightweight as possible.
-   * - Defer any non-trivial processing (validation + setState) to the next tick.
+   * - Defer UI-heavy processing (validation + setState) to the next tick.
    *
    * Reliability hardening:
    * - ALWAYS materialize a real `File[]` synchronously inside the onChange handler.
-   *   Some browsers can invalidate/empty the underlying FileList after the event loop tick,
-   *   which caused the "Select Files" background upload to sometimes send 0 files.
+   * - Kick off the upload immediately using that snapshot, so we never depend on any
+   *   potentially-invalidated FileList or delayed timers.
    */
-  const pendingFileSelectionTimerRef = useRef<number | null>(null);
 
   // Conservative safety cap to avoid pathological selections overwhelming the tab.
   // (This is separate from backend limits; it’s purely a frontend stability guard.)
@@ -591,7 +590,9 @@ export default function App() {
     }
 
     const list = e.target.files;
+
     // Ensure the input can trigger future selections of the same file.
+    // (Also breaks any accidental dependence on the live FileList.)
     e.target.value = '';
 
     // Some browsers can fire a change event with a null/empty file list (e.g., cancel).
@@ -600,54 +601,69 @@ export default function App() {
     // CRITICAL: snapshot as a real array NOW (do not retain FileList reference).
     const newFiles = Array.from(list);
 
-    // Debounce bursts of change events, but DO NOT drop events entirely.
-    if (pendingFileSelectionTimerRef.current) {
-      window.clearTimeout(pendingFileSelectionTimerRef.current);
-      pendingFileSelectionTimerRef.current = null;
-    }
+    // 1) Start upload immediately (best-effort) so file selection always triggers upload.
+    void (async () => {
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[upload][picker] uploading selected files', {
+          count: newFiles.length,
+          names: newFiles.map((f) => f.name),
+          sizes: newFiles.map((f) => f.size),
+          types: newFiles.map((f) => f.type),
+        });
 
-    pendingFileSelectionTimerRef.current = window.setTimeout(() => {
-      // Total-size guard (existing + new).
-      const existingBytes = uploadedFiles.reduce((sum, f) => sum + (f.file?.size ?? 0), 0);
-      const newBytes = newFiles.reduce((sum, f) => sum + (f.size ?? 0), 0);
-      if (existingBytes + newBytes > MAX_TOTAL_UPLOAD_BYTES) {
-        setUploadError(
-          `Selected files are too large for in-browser processing. Please keep total upload size under ${Math.round(
-            MAX_TOTAL_UPLOAD_BYTES / (1024 * 1024)
-          )}MB.`
-        );
-        pendingFileSelectionTimerRef.current = null;
-        return;
+        const { uploadDocuments } = await import('../lib/apiClient');
+        const resp = await uploadDocuments({ files: newFiles });
+
+        // eslint-disable-next-line no-console
+        console.log('[upload][picker] uploadDocuments response', resp);
+      } catch (err: any) {
+        // eslint-disable-next-line no-console
+        console.warn('[upload][picker] upload failed', err);
+        setBackendError(err?.message || 'Upload failed. Please try again.');
       }
+    })();
 
-      addFiles(newFiles);
+    // 2) Defer UI state updates + validation to next tick to reduce chance of freezes.
+    window.setTimeout(() => {
+      // Total-size guard (existing + new).
+      // NOTE: use a functional update to avoid stale closure issues with `uploadedFiles`.
+      const newBytes = newFiles.reduce((sum, f) => sum + (f.size ?? 0), 0);
 
-      // Make “Select Files” behave like a real upload action (same user expectation as drag/drop):
-      // immediately upload the selected files in the background.
-      void (async () => {
-        try {
-          // eslint-disable-next-line no-console
-          console.log('[upload][picker] uploading selected files', {
-            count: newFiles.length,
-            names: newFiles.map((f) => f.name),
-            sizes: newFiles.map((f) => f.size),
-            types: newFiles.map((f) => f.type),
-          });
-
-          const { uploadDocuments } = await import('../lib/apiClient');
-          const resp = await uploadDocuments({ files: newFiles });
-
-          // eslint-disable-next-line no-console
-          console.log('[upload][picker] uploadDocuments response', resp);
-        } catch (err: any) {
-          // Surface this since the user report says “no logs / no upload”.
-          // eslint-disable-next-line no-console
-          console.warn('[upload][picker] upload failed', err);
-          setBackendError(err?.message || 'Upload failed. Please try again.');
+      setUploadedFiles((prev) => {
+        const existingBytes = prev.reduce((sum, f) => sum + (f.file?.size ?? 0), 0);
+        if (existingBytes + newBytes > MAX_TOTAL_UPLOAD_BYTES) {
+          setUploadError(
+            `Selected files are too large for in-browser processing. Please keep total upload size under ${Math.round(
+              MAX_TOTAL_UPLOAD_BYTES / (1024 * 1024)
+            )}MB.`
+          );
+          return prev;
         }
-      })();
 
-      pendingFileSelectionTimerRef.current = null;
+        // Preserve the exact same behavior/validation logic as addFiles(), but avoid
+        // relying on any potentially-stale outer `uploadedFiles`.
+        setUploadError('');
+        setBackendError('');
+
+        const invalidFiles = newFiles.filter((file) => !validateFile(file));
+        if (invalidFiles.length > 0) {
+          setUploadError('Unsupported file format. Please upload PDF, DOCX, or TXT.');
+          return prev;
+        }
+
+        if (prev.length + newFiles.length > MAX_FILES) {
+          setUploadError(`Maximum ${MAX_FILES} documents allowed.`);
+          return prev;
+        }
+
+        const newUploadedFiles = newFiles.map((file) => ({
+          id: Math.random().toString(36).substr(2, 9),
+          file,
+        }));
+
+        return [...prev, ...newUploadedFiles];
+      });
     }, 0);
   };
 
