@@ -23,6 +23,7 @@ const nextConfig = {
       'http://localhost:3001';
 
     return [
+      // Backend API routes (safe to proxy in dev to avoid CORS and to allow same-origin fetches)
       { source: '/uploads/:path*', destination: `${backend}/uploads/:path*` },
       { source: '/orchestration/:path*', destination: `${backend}/orchestration/:path*` },
       { source: '/builds/:path*', destination: `${backend}/builds/:path*` },
@@ -31,7 +32,14 @@ const nextConfig = {
       { source: '/ai/:path*', destination: `${backend}/ai/:path*` },
       { source: '/extraction/:path*', destination: `${backend}/extraction/:path*` },
       { source: '/health/:path*', destination: `${backend}/health/:path*` },
-      { source: '/', destination: `${backend}/` },
+
+      // Swagger UI + OpenAPI JSON served by the Express backend.
+      // Important: include both /docs and /docs/* so swagger-ui-express static assets load correctly.
+      { source: '/docs', destination: `${backend}/docs` },
+      { source: '/docs/:path*', destination: `${backend}/docs/:path*` },
+
+      // Do NOT rewrite '/' to the backend. That would shadow the Next.js app itself and make
+      // Swagger/UI behavior confusing in dev.
     ];
   },
 
