@@ -567,13 +567,13 @@ export default function App() {
   /**
    * Chrome crash/freeze mitigation:
    * - Keep the native file input `onChange` handler as lightweight as possible.
-   * - Guard against duplicate/re-entrant change events (observed on some Chrome+OS combos).
    * - Defer any non-trivial processing (validation + setState) to the next tick.
    *
-   * The goal is to avoid doing “work” while the browser is still finalizing the file dialog close,
-   * which can lead to heavy main-thread pressure (and in extreme cases, tab instability).
+   * Reliability hardening:
+   * - ALWAYS materialize a real `File[]` synchronously inside the onChange handler.
+   *   Some browsers can invalidate/empty the underlying FileList after the event loop tick,
+   *   which caused the "Select Files" background upload to sometimes send 0 files.
    */
-  const isProcessingFileSelectionRef = useRef(false);
   const pendingFileSelectionTimerRef = useRef<number | null>(null);
 
   // Conservative safety cap to avoid pathological selections overwhelming the tab.
@@ -590,29 +590,23 @@ export default function App() {
       setIsFileDialogActive(false);
     }
 
-    // Some browsers can fire a change event with a null/empty file list (e.g., cancel).
-    if (!e.target.files || e.target.files.length === 0) {
-      // Ensure the input can trigger future selections of the same file.
-      e.target.value = '';
-      return;
-    }
-
-    // Snapshot the FileList immediately, then release the input.
-    // (Do not do any heavy work before clearing the input.)
-    const fileList = e.target.files;
+    const list = e.target.files;
+    // Ensure the input can trigger future selections of the same file.
     e.target.value = '';
 
+    // Some browsers can fire a change event with a null/empty file list (e.g., cancel).
+    if (!list || list.length === 0) return;
+
+    // CRITICAL: snapshot as a real array NOW (do not retain FileList reference).
+    const newFiles = Array.from(list);
+
     // Debounce bursts of change events, but DO NOT drop events entirely.
-    // The previous “single-flight drop” could cause legitimate file picker selections
-    // to be ignored on some browser/OS timing combinations.
     if (pendingFileSelectionTimerRef.current) {
       window.clearTimeout(pendingFileSelectionTimerRef.current);
       pendingFileSelectionTimerRef.current = null;
     }
 
     pendingFileSelectionTimerRef.current = window.setTimeout(() => {
-      const newFiles = Array.from(fileList);
-
       // Total-size guard (existing + new).
       const existingBytes = uploadedFiles.reduce((sum, f) => sum + (f.file?.size ?? 0), 0);
       const newBytes = newFiles.reduce((sum, f) => sum + (f.size ?? 0), 0);
@@ -629,9 +623,7 @@ export default function App() {
       addFiles(newFiles);
 
       // Make “Select Files” behave like a real upload action (same user expectation as drag/drop):
-      // we immediately upload the selected files in the background.
-      // Persona generation will still do its own upload step for safety, but this removes the
-      // “nothing happened” failure mode when users only use the picker.
+      // immediately upload the selected files in the background (best-effort).
       void (async () => {
         try {
           const { uploadDocuments } = await import('../lib/apiClient');
