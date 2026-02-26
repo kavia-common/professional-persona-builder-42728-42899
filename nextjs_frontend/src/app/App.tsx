@@ -602,41 +602,48 @@ export default function App() {
     const fileList = e.target.files;
     e.target.value = '';
 
-    // Debounce/merge bursts of change events.
+    // Debounce bursts of change events, but DO NOT drop events entirely.
+    // The previous “single-flight drop” could cause legitimate file picker selections
+    // to be ignored on some browser/OS timing combinations.
     if (pendingFileSelectionTimerRef.current) {
       window.clearTimeout(pendingFileSelectionTimerRef.current);
       pendingFileSelectionTimerRef.current = null;
     }
 
-    // Single-flight guard: if we are already processing a selection, drop subsequent bursts.
-    // This avoids duplicate work and potential state churn.
-    if (isProcessingFileSelectionRef.current) {
-      return;
-    }
-
-    isProcessingFileSelectionRef.current = true;
-
     pendingFileSelectionTimerRef.current = window.setTimeout(() => {
-      try {
-        const newFiles = Array.from(fileList);
+      const newFiles = Array.from(fileList);
 
-        // Total-size guard (existing + new).
-        const existingBytes = uploadedFiles.reduce((sum, f) => sum + (f.file?.size ?? 0), 0);
-        const newBytes = newFiles.reduce((sum, f) => sum + (f.size ?? 0), 0);
-        if (existingBytes + newBytes > MAX_TOTAL_UPLOAD_BYTES) {
-          setUploadError(
-            `Selected files are too large for in-browser processing. Please keep total upload size under ${Math.round(
-              MAX_TOTAL_UPLOAD_BYTES / (1024 * 1024)
-            )}MB.`
-          );
-          return;
-        }
-
-        addFiles(newFiles);
-      } finally {
-        isProcessingFileSelectionRef.current = false;
+      // Total-size guard (existing + new).
+      const existingBytes = uploadedFiles.reduce((sum, f) => sum + (f.file?.size ?? 0), 0);
+      const newBytes = newFiles.reduce((sum, f) => sum + (f.size ?? 0), 0);
+      if (existingBytes + newBytes > MAX_TOTAL_UPLOAD_BYTES) {
+        setUploadError(
+          `Selected files are too large for in-browser processing. Please keep total upload size under ${Math.round(
+            MAX_TOTAL_UPLOAD_BYTES / (1024 * 1024)
+          )}MB.`
+        );
         pendingFileSelectionTimerRef.current = null;
+        return;
       }
+
+      addFiles(newFiles);
+
+      // Make “Select Files” behave like a real upload action (same user expectation as drag/drop):
+      // we immediately upload the selected files in the background.
+      // Persona generation will still do its own upload step for safety, but this removes the
+      // “nothing happened” failure mode when users only use the picker.
+      void (async () => {
+        try {
+          const { uploadDocuments } = await import('../lib/apiClient');
+          await uploadDocuments({ files: newFiles });
+        } catch (err) {
+          // Best-effort only; keep UX non-blocking.
+          // eslint-disable-next-line no-console
+          console.warn('[upload][picker] background upload failed (best-effort)', err);
+        }
+      })();
+
+      pendingFileSelectionTimerRef.current = null;
     }, 0);
   };
 
@@ -692,16 +699,36 @@ export default function App() {
         types: files.map((f) => f.type),
       });
 
-      // We still need to upload to establish latest docs on the backend; orchestration can then pick them up.
+      // Upload first (side effects: persists document rows + extracted text rows best-effort).
       await import('../lib/apiClient').then(async ({ uploadDocuments }) => {
         const uploadResp = await uploadDocuments({ files });
         // eslint-disable-next-line no-console
         console.log(`[draft][gen:${generationId}] uploadDocuments raw response:`, uploadResp);
       });
 
+      // CRITICAL: Do NOT rely on backend “useLatestCategoryDocs” auto-selection for anonymous sessions,
+      // because userId is typically null in this UI and the backend may pick up older anonymous docs
+      // (e.g., an archived/stale persona source like “Rossini”).
+      //
+      // Instead, explicitly fetch the newest documents and pass their ids to orchestration.
+      const { listDocuments } = await import('../lib/apiClient');
+      const docs = await listDocuments({ limit: 50, offset: 0 });
+      const newestDocIds = docs
+        .slice()
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .slice(0, files.length) // pick as many as we just uploaded
+        .map((d) => d.id);
+
+      if (newestDocIds.length === 0) {
+        throw new Error('Upload succeeded but no documents are available for orchestration. Please retry.');
+      }
+
       const runAllRequest = {
         mode: 'persona_build' as const,
-        useLatestCategoryDocs: true,
+        // We provide explicit documentIds to ensure newly uploaded docs drive extraction + generation.
+        documentIds: newestDocIds,
+        // Disable the anonymous “latest category docs” path; we want explicit selection.
+        useLatestCategoryDocs: false,
         autoCreatePersona: true,
         generate: {
           saveDraft: true,
